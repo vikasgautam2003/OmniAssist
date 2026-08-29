@@ -1,6 +1,6 @@
 # 📚 OmniAssist — LEARN SHEET
 
-**Owner:** Vikas · **Started:** 2026-08-02 · **Current version:** v0.1 · **Current block:** Block 1 (Step 2 of 8)
+**Owner:** Vikas · **Started:** 2026-08-02 · **Current version:** v0.1 · **Current block:** Block 1 ✅ complete → Block 2 next
 
 > Every concept learned, every decision made, and *why*. Append-only — superseded entries are struck through, never deleted, because the reasoning trail is worth more than a tidy document.
 
@@ -155,6 +155,37 @@ Learned by getting it wrong: `git init` had landed at `projects/`, so the repo c
 
 **Also: the project name is not cosmetic.** It becomes the import path, the package name, the GitHub URL, and the Docker image tag. Fix it on day one; unwinding it in v0.4 is miserable.
 
+### C14 — Presence validation ≠ value protection (`SecretStr`)
+Making a key **required** (C4) and keeping it **out of logs** are different problems. A plain `str` key is invisible to git but fully visible to `repr()`, `str()`, tracebacks, framework error pages, and any observability tool that serialises objects.
+
+> **Secrets rarely leak because someone committed them. They leak because something *printed* them.**
+
+`SecretStr` renders as `SecretStr('**********')` and requires `.get_secret_value()` to read. Accidental exposure becomes impossible; deliberate access still works. Verified empirically: `'gsk_' in repr(settings)` went `True` → `False`.
+
+### C15 — Validate values, not just presence (`Literal`)
+`llm_provider: str` accepts `"bananacloud"`. `app_env: str` accepts `"prodution"` — which in v0.4 would silently take the *non-production* branch **in production**. A typo that validates is worse than one that crashes, because the failure surfaces far from its cause.
+
+`Literal["groq", "anthropic"]` rejects it at startup, naming the permitted values. **Real payoff:** `LLM_PROVIDER=grok` — a typo actually made repeatedly in this project's own planning — is now impossible to deploy. *Encode the mistakes you personally make into the type system.*
+
+### C16 — Formatting ≠ linting
+Two different jobs, both in CI:
+
+| Tool | Job | Caught here |
+|---|---|---|
+| `ruff format` | Layout — whitespace, line breaks, quotes | stray blank lines |
+| `ruff check` | Convention & correctness — import order, unused vars, bugs | `I001` import order |
+
+`ruff format` reported "already formatted" while `ruff check` still failed. Passing one says nothing about the other. Import order convention: **stdlib → third-party → local**, alphabetical within groups.
+
+### C17 — Git tracks files, not directories
+An empty `tests/` directory simply does not exist to git. Commit, clone elsewhere, and the folder is gone. Convention: an empty `.gitkeep` file to hold the directory open. (`.gitkeep` is not a git feature — purely a naming convention.)
+
+### C18 — Commit messages: Conventional Commits, and *why* not *how*
+`feat:` / `fix:` / `chore:` prefixes are machine-readable and later drive changelog generation and semantic versioning. The **body** should explain *what changed and why* — the diff already shows *how*. Six months on, the body is the only record of why `SecretStr` is there.
+
+### C19 — Verify behaviour, not exit codes
+`git check-ignore -v .env.example` exits **0** when *any* pattern matches — **including a negation** (`!.env.example`). Branching on that exit code produced a false "wrongly ignored" alarm. The definitive test was behavioural: does `git add --dry-run` succeed, and does the file appear in `git status`? *Don't trust a tool's exit code whose semantics you haven't checked.*
+
 ---
 
 ## 📊 REFERENCE — LLM API pricing (2026-08-02)
@@ -204,14 +235,24 @@ Learned by getting it wrong: `git init` had landed at `projects/`, so the repo c
 | Why pin the Python version? | ✅ Strong | Named reproducibility; added the 3 concrete failure modes + the `.python-version` vs `requires-python` distinction → C12 |
 | What breaks without a virtualenv? | ✅ Right instinct | It's mostly *packages*, not Python; plus system-Python pollution and unreproducible dependency lists → C11 |
 
+**2026-08-02 — Block 1 adversarial code review of `app/config.py`: 3 findings, 2 real defects**
+
+| # | Severity | Finding | Outcome |
+|---|---|---|---|
+| 1 | 🔴 Security | API key leaked via `repr()` / `str()` / tracebacks | Fixed with `SecretStr` → C14 |
+| 2 | 🟠 Correctness | Invalid values accepted (`bananacloud`, `prodution`) | Fixed with `Literal` → C15 |
+| 3 | 🟡 Style | Inconsistent blank lines + unsorted imports | Fixed via `ruff format` + `ruff check --fix` → C16 |
+
+Final state: 6/6 verification checks pass — lint clean, format clean, three distinct invalid configs rejected at startup, happy path loads, zero key leakage.
+
 ---
 
 ## 🧱 BLOCK PROGRESS — v0.1
 
 | Block | Status |
 |---|---|
-| **1 — Repo skeleton + config & secrets** | 🔄 In progress (Step 1 ✅ · Step 2 next) |
-| 2 — First raw LLM call | ⬜ |
+| **1 — Repo skeleton + config & secrets** | ✅ **COMPLETE** (2026-08-02) — 8/8 steps · commit `6e40a75` · [github.com/vikasgautam2003/OmniAssist](https://github.com/vikasgautam2003/OmniAssist) |
+| 2 — First raw LLM call *(the D8 client interface)* | 🔜 **NEXT** |
 | 3 — Streaming | ⬜ |
 | 4 — FastAPI + SSE + history *(includes D11 trimming)* | ⬜ |
 | 5 — Streamlit UI | ⬜ |
@@ -228,3 +269,6 @@ Learned by getting it wrong: `git init` had landed at `projects/`, so the repo c
 | 2026-08-02 | `FLAGSHIP_PROJECT.md` — stack switched to provider-agnostic LLM layer (Groq default); Groq-free-tier decision recorded |
 | 2026-08-02 | `LEARN_SHEET.md` created, then lost in a folder cleanup, then rebuilt in full — **now correctly located at `projects/omniassist/`** |
 | 2026-08-02 | Project scaffolded: `uv init . --python 3.12`, renamed `ai` → `omniassist`, `pyproject.toml` name fixed, git repo re-rooted at the project (D12, C13) |
+| 2026-08-02 | **Block 1 COMPLETE** — `.gitignore`, `.env`/`.env.example`, `app/config.py` (fail-fast + `SecretStr` + `Literal`), `tests/.gitkeep`, genesis commit `6e40a75`, pushed to `github.com/vikasgautam2003/OmniAssist` (private) |
+| 2026-08-02 | Security audit on committed tree: `.env` absent, no `gsk_` key anywhere in git history, `.venv` excluded, `uv.lock` + `.env.example` committed — **5/5 clean** |
+| 2026-08-02 | `~/Downloads/OmniAssist_Project_Synopsis.docx` generated in the college template format (5 sections, 15 references, 2,799 words) |
