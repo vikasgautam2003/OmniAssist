@@ -1,6 +1,6 @@
 # 📚 OmniAssist — LEARN SHEET
 
-**Owner:** Vikas · **Started:** 2026-08-02 · **Current version:** v0.1 · **Current block:** Block 1 ✅ complete → Block 2 next
+**Owner:** Vikas · **Started:** 2026-08-02 · **Current version:** v0.1 · **Current block:** Blocks 1–2 ✅ complete → Block 3 (streaming) next
 
 > Every concept learned, every decision made, and *why*. Append-only — superseded entries are struck through, never deleted, because the reasoning trail is worth more than a tidy document.
 
@@ -21,6 +21,7 @@
 | ~~D9~~ | ~~Dev model = `claude-haiku-4-5`~~ | *Superseded by D10 (budget = $0). Kept for the reasoning trail.* | — |
 | **D10** | **v0.1 runs on Groq free tier — `llama-3.3-70b-versatile`** | Budget is $0. Groq = ~1,000 req/day, 30 RPM, **no credit card, ongoing**; Anthropic has no free tier. v0.1 needs ~200 requests total. ⚠️ **Groq ≠ Grok** — Groq is an inference provider serving open-weight models (free); Grok is xAI's model ($25 credits then paid). Config is provider-neutral: `LLM_PROVIDER` / `LLM_API_KEY` / `LLM_MODEL`. | Yes — that's the point of D8 |
 | **D11** | **Conversation history must be trimmed** (Block 4), not left unbounded | Groq's free tier caps ~**14,400 tokens/minute**. Per C10, a 40-turn conversation is ~40K tokens in *one* request — over the entire per-minute budget. **A limit that makes you build it right beats unlimited quota that lets you build it wrong.** | No |
+| **D13** | **Model switched to `openai/gpt-oss-120b`** on Groq | Changed by editing **one line of `.env`** — zero code changes. Live proof that D3 + D8 work. | Yes — one line |
 | **D12** | **The git repo is rooted at the project, not the parent folder** | Learned the hard way — `git init` had landed at `projects/`, mixing study notes with product code. See C13. | No |
 
 ---
@@ -186,6 +187,53 @@ An empty `tests/` directory simply does not exist to git. Commit, clone elsewher
 ### C19 — Verify behaviour, not exit codes
 `git check-ignore -v .env.example` exits **0** when *any* pattern matches — **including a negation** (`!.env.example`). Branching on that exit code produced a false "wrongly ignored" alarm. The definitive test was behavioural: does `git add --dry-run` succeed, and does the file appear in `git status`? *Don't trust a tool's exit code whose semantics you haven't checked.*
 
+### C20 — Dependency Inversion, and why `Protocol` over `ABC`
+> **High-level code must not depend on low-level code. Both depend on an abstraction.**
+
+The trap: `from groq import Groq` inside `services/` welds business logic to one vendor. Every service imports it; swapping providers touches all of them; testing needs a live key.
+
+The fix: `services/ → LLMClient (interface) ← GroqClient`. The arrow from the vendor points **up** at your contract — that's the "inversion."
+
+| | `ABC` | `Protocol` ← chosen |
+|---|---|---|
+| Conformance | must **inherit** | just **has the methods** |
+| Typing | nominal | structural (checked duck typing) |
+| Test double must inherit? | yes | **no** |
+
+Decisive reason: `FakeLLMClient` satisfies the contract *without importing or inheriting anything from production code*, and mypy still verifies it. **Proven:** one `talk(client: LLMClient)` function drove a live Groq client and a keyless fake.
+
+### C21 — The composition root
+Exactly one place is allowed to know both the global config **and** the concrete implementations: the factory. Everything downstream receives an `LLMClient` and never learns which one.
+
+Two deliberate details in `factory.py`:
+- **Returns `-> LLMClient`, not `-> GroqClient`.** Annotate the concrete type and callers start reaching for vendor-specific attributes; the abstraction leaks within a week.
+- **The vendor import sits inside the function.** Importing the factory doesn't pull `groq` into memory; a Groq-only deployment never loads the Anthropic SDK.
+
+### C22 — Static typing catches what passing tests do not
+The live call returned `"OK"` — green, working, shipped. mypy then found `message.content` is `str | None` while `chat()` promised `-> str`.
+
+Failure mode if unfixed: `chat()` returns `None`; three layers up something calls `.strip()`; `AttributeError` in a file unrelated to the cause. **Bugs that surface far from their origin are the expensive kind.** The happy path is common, which is exactly why tests alone miss this.
+
+**Corollary — not every type error is your bug.** mypy also flagged `Settings()` for a "missing argument" it can't know is populated from `.env` at runtime. Correct fix: enable `plugins = ["pydantic.mypy"]` (verified: 3 errors → 2). Wrong fix: `# type: ignore`, which would also silence real errors.
+
+### C23 — The adapter boundary translates types *and* errors
+Two leaks the adapter must stop:
+
+**Types.** Your `Message` is `dict[str, str]`; the SDK wants `ChatCompletionUserMessageParam`. `cast()` at that seam is legitimate — translating is the adapter's whole job. The alternative leaks vendor TypedDicts into `services/`. *A cast at a boundary is fine; a cast inside business logic is a smell.*
+
+**Errors.** Services must never catch `groq.RateLimitError`. The adapter raises a vendor-neutral `LLMError`. **A vendor leaks upward through its exception types just as easily as through its imports.**
+
+### C24 — How to read an unfamiliar API (the FDE skill)
+Six questions to answer from the docs — *copying exact names, never guessing*: **auth** · **exact call path** · **request shape** · **response extraction path** · **exception class names** · **streaming mechanics**.
+
+Then **verify against the installed library, not the docs or your memory** — `inspect.signature`, `dir()`. Doing so surfaced two things the quickstart never mentioned:
+1. **`max_retries=2` is the default** — one logical call can be three HTTP requests, tripling cost and burning rate limit during exactly the moments you're already throttled. *Never inherit a default you didn't choose.*
+2. **14 exception classes exist**, including `RateLimitError` — which D11 guarantees you will hit on the free tier.
+
+> **"It raises errors when something goes wrong" is never an acceptable answer about an API.** Retry logic, alerting and user-facing messages all branch on class names.
+
+**Also noted for Block 3:** streaming uses `chunk.choices[0].delta.content` — **`delta`, not `message`.** Different shape from the non-streaming path.
+
 ---
 
 ## 📊 REFERENCE — LLM API pricing (2026-08-02)
@@ -245,6 +293,20 @@ An empty `tests/` directory simply does not exist to git. Commit, clone elsewher
 
 Final state: 6/6 verification checks pass — lint clean, format clean, three distinct invalid configs rejected at startup, happy path loads, zero key leakage.
 
+**2026-08-02 — Block 2 API-reference reading: 5/6**
+
+Correct on auth, call path, message shape, response extraction, streaming flag. Weak on **errors** — "it raises exceptions" is not actionable; the answer needed class names. Introspection then found `max_retries=2` silently on by default, which the docs did not surface.
+
+**2026-08-02 — Block 2 mypy review: 3 findings**
+
+| # | Type | Finding | Outcome |
+|---|---|---|---|
+| 1 | False positive | `Settings()` "missing argument" — mypy can't see `.env` | Enabled `pydantic.mypy` plugin → C22 |
+| 2 | Structural | `dict[str,str]` vs SDK TypedDicts | `cast` at the adapter seam → C23 |
+| 3 | 🔴 **Real bug** | `content` is `str \| None`, signature promised `str` | Raise `LLMError` → C22/C23 |
+
+Final: mypy clean, ruff clean, live call returns `OK`, fake works with no `.env` and no key.
+
 ---
 
 ## 🧱 BLOCK PROGRESS — v0.1
@@ -252,8 +314,8 @@ Final state: 6/6 verification checks pass — lint clean, format clean, three di
 | Block | Status |
 |---|---|
 | **1 — Repo skeleton + config & secrets** | ✅ **COMPLETE** (2026-08-02) — 8/8 steps · commit `6e40a75` · [github.com/vikasgautam2003/OmniAssist](https://github.com/vikasgautam2003/OmniAssist) |
-| 2 — First raw LLM call *(the D8 client interface)* | 🔜 **NEXT** |
-| 3 — Streaming | ⬜ |
+| **2 — LLM client (D8 interface + GroqClient + factory + fake)** | ✅ **COMPLETE** (2026-08-02) |
+| 3 — Streaming | 🔜 **NEXT** |
 | 4 — FastAPI + SSE + history *(includes D11 trimming)* | ⬜ |
 | 5 — Streamlit UI | ⬜ |
 | 6 — GitHub Actions CI + README + tag `v0.1` | ⬜ |
@@ -272,3 +334,4 @@ Final state: 6/6 verification checks pass — lint clean, format clean, three di
 | 2026-08-02 | **Block 1 COMPLETE** — `.gitignore`, `.env`/`.env.example`, `app/config.py` (fail-fast + `SecretStr` + `Literal`), `tests/.gitkeep`, genesis commit `6e40a75`, pushed to `github.com/vikasgautam2003/OmniAssist` (private) |
 | 2026-08-02 | Security audit on committed tree: `.env` absent, no `gsk_` key anywhere in git history, `.venv` excluded, `uv.lock` + `.env.example` committed — **5/5 clean** |
 | 2026-08-02 | `~/Downloads/OmniAssist_Project_Synopsis.docx` generated in the college template format (5 sections, 15 references, 2,799 words) |
+| 2026-08-02 | **Block 2 COMPLETE** — `app/clients/{base,groq_client,factory}.py` + `tests/fakes.py`; `LLMClient` Protocol, `LLMError`, composition root, keyless fake; mypy + pydantic plugin configured; concepts C20–C24 |
