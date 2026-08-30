@@ -1,6 +1,6 @@
 # 📚 OmniAssist — LEARN SHEET
 
-**Owner:** Vikas · **Started:** 2026-08-02 · **Current version:** v0.1 · **Current block:** Blocks 1–2 ✅ complete → Block 3 (streaming) next
+**Owner:** Vikas · **Started:** 2026-08-02 · **Current version:** v0.1 · **Current block:** Blocks 1–3 ✅ complete → Block 4 (FastAPI + SSE + history) next
 
 > Every concept learned, every decision made, and *why*. Append-only — superseded entries are struck through, never deleted, because the reasoning trail is worth more than a tidy document.
 
@@ -234,6 +234,56 @@ Then **verify against the installed library, not the docs or your memory** — `
 
 **Also noted for Block 3:** streaming uses `chunk.choices[0].delta.content` — **`delta`, not `message`.** Different shape from the non-streaming path.
 
+### C25 — A parameter that changes the return type should have been a separate function
+`chat(messages, stream: bool)` would return `str | Iterator[str]` — forcing *every* caller to narrow a union, including the 90% who passed `stream=False` and know exactly what they're getting. `@overload` can paper over it, but that's machinery invented to solve a self-inflicted problem.
+
+Also: flag arguments hide intent (`chat(msgs, True)` says nothing) and a Protocol declaring **two methods** forces every implementer — including the fake — to provide both. A bool can be silently ignored.
+
+### C26 — Streaming is a UX and reliability feature, not a performance one
+| Reason | Effect |
+|---|---|
+| **Perceived latency** | Total time is unchanged (sometimes marginally worse). Reading starts immediately. |
+| **Timeouts** | Long generations exceed proxy/LB timeouts; flowing bytes keep the connection alive (bites in v0.4). |
+| **Cancellation** | User stops a bad generation → stop paying for tokens (C10). |
+
+Measured: first token 0.58s vs total 0.86s. Small on Groq (very fast); on a slower provider generating 500 tokens the gap becomes ~0.4s vs ~8s. **The benefit scales with generation length.**
+
+### C27 — Generator laziness, and the eager/lazy split
+**A function containing `yield` does not execute when called** — it returns a generator; the body runs only on iteration.
+
+This bit for real: `self.calls.append(...)` inside the generator body meant the call was never recorded until something iterated. `stream_chat(msgs)` then `assert len(fake.calls) == 1` **failed**.
+
+> **Pattern: if a generator function must do anything eagerly — validate arguments, record a call, acquire a resource — split it into a plain function that returns the generator.**
+
+```python
+def stream_chat(self, messages):     # plain function — body runs on call
+    self.calls.append(messages)
+    return self._stream()
+
+def _stream(self):                   # generator — runs on iteration
+    ...
+    yield piece
+```
+
+**Same property in the real client, deliberately:** `GroqClient.stream_chat` issues no HTTP request until iterated. Good (don't pay for an unconsumed stream) — but an `AuthenticationError` surfaces at the first `for` loop, not at the call site.
+
+### C28 — A test double that lies gives you confidence you haven't earned
+The fake yielded `word + " "`, so `"".join(stream_chat(m))` was `'one two three '` while `chat(m)` returned `'one two three'`. Real provider chunks concatenate **exactly**.
+
+> **Invariant the fake must uphold: `"".join(client.stream_chat(m)) == client.chat(m)`**
+
+Why it matters: Block 4 accumulates streamed chunks into history. A test on the unfaithful fake stores a trailing space and **passes**; production stores something different. *A test that passes while the real path is broken is worse than no test.* Fix: yield fixed-size character slices — exact reconstruction by construction, and closer to real token boundaries than word-splitting.
+
+### C29 — The same value can mean different things in different contexts
+`content` is `str | None` in both methods. The correct handling is **opposite**:
+
+| Context | Meaning of `None` | Response |
+|---|---|---|
+| `chat()` — the whole reply | Anomaly: model produced nothing | **raise `LLMError`** |
+| `stream_chat()` — one chunk | Routine: first chunk carries the role, last carries a finish reason | **skip and continue** |
+
+Decide what a value *means in context* before deciding what to do with it. That judgement is most of what separates correct code from merely defensive code.
+
 ---
 
 ## 📊 REFERENCE — LLM API pricing (2026-08-02)
@@ -307,6 +357,15 @@ Correct on auth, call path, message shape, response extraction, streaming flag. 
 
 Final: mypy clean, ruff clean, live call returns `OK`, fake works with no `.env` and no key.
 
+**2026-08-02 — Block 3 review: 2 findings, both real**
+
+| # | Finding | Outcome |
+|---|---|---|
+| 1 | Fake's stream didn't reconstruct its own `chat()` (trailing space) | Fixed-size chunking → C28 |
+| 2 | 🔴 `self.calls` never recorded — eager work sat inside a generator body | Eager/lazy split → C27 |
+
+Design question answered correctly: separate `stream_chat()` over a `stream: bool` flag → C25.
+
 ---
 
 ## 🧱 BLOCK PROGRESS — v0.1
@@ -315,8 +374,8 @@ Final: mypy clean, ruff clean, live call returns `OK`, fake works with no `.env`
 |---|---|
 | **1 — Repo skeleton + config & secrets** | ✅ **COMPLETE** (2026-08-02) — 8/8 steps · commit `6e40a75` · [github.com/vikasgautam2003/OmniAssist](https://github.com/vikasgautam2003/OmniAssist) |
 | **2 — LLM client (D8 interface + GroqClient + factory + fake)** | ✅ **COMPLETE** (2026-08-02) |
-| 3 — Streaming | 🔜 **NEXT** |
-| 4 — FastAPI + SSE + history *(includes D11 trimming)* | ⬜ |
+| **3 — Streaming** | ✅ **COMPLETE** (2026-08-02) |
+| 4 — FastAPI + SSE + history *(includes D11 trimming)* | 🔜 **NEXT** |
 | 5 — Streamlit UI | ⬜ |
 | 6 — GitHub Actions CI + README + tag `v0.1` | ⬜ |
 
@@ -335,3 +394,4 @@ Final: mypy clean, ruff clean, live call returns `OK`, fake works with no `.env`
 | 2026-08-02 | Security audit on committed tree: `.env` absent, no `gsk_` key anywhere in git history, `.venv` excluded, `uv.lock` + `.env.example` committed — **5/5 clean** |
 | 2026-08-02 | `~/Downloads/OmniAssist_Project_Synopsis.docx` generated in the college template format (5 sections, 15 references, 2,799 words) |
 | 2026-08-02 | **Block 2 COMPLETE** — `app/clients/{base,groq_client,factory}.py` + `tests/fakes.py`; `LLMClient` Protocol, `LLMError`, composition root, keyless fake; mypy + pydantic plugin configured; concepts C20–C24 |
+| 2026-08-02 | **Block 3 COMPLETE** — `stream_chat()` on the Protocol, `GroqClient` (stream=True, `delta.content`, None-skipped), faithful chunking fake with eager/lazy split; concepts C25–C29 |

@@ -1,3 +1,4 @@
+from collections.abc import Iterator
 from typing import Any, cast
 
 from groq import Groq
@@ -27,3 +28,17 @@ class GroqClient:
             raise LLMError("Provider returned no content")
 
         return content
+
+    def stream_chat(self, messages: list[Message]) -> Iterator[str]:
+        stream = self.client.chat.completions.create(
+            model=self.model,
+            messages=cast(Any, messages),
+            max_tokens=self.max_tokens,
+            stream=True,
+        )
+
+        for chunk in stream:
+            content = chunk.choices[0].delta.content
+
+            if content is not None:
+                yield content
