@@ -29,8 +29,6 @@ class GroqClient:
 
         return content
 
-
-
     def stream_chat(self, messages: list[Message]) -> Iterator[str]:
         stream = self.client.chat.completions.create(
             model=self.model,
