@@ -1,5 +1,6 @@
 import json
 from collections.abc import Iterator
+from functools import lru_cache
 
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
@@ -10,7 +11,15 @@ from app.services.chat import ChatService
 
 router = APIRouter()
 
-_service = ChatService(get_llm_client())
+
+@lru_cache(maxsize=1)
+def get_chat_service() -> ChatService:
+    """One shared service for the process, built on first request.
+
+    Cached so conversation history survives between requests; lazy so that
+    importing this module requires no credentials.
+    """
+    return ChatService(get_llm_client())
 
 
 class ChatRequest(BaseModel):
@@ -25,7 +34,7 @@ def _to_sse(chunks: Iterator[str]) -> Iterator[str]:
 
 @router.post("/chat/{conversation_id}")
 def chat(conversation_id: str, request: ChatRequest) -> StreamingResponse:
-    stream = _service.stream_reply(conversation_id, request.message)
+    stream = get_chat_service().stream_reply(conversation_id, request.message)
     return StreamingResponse(
         _to_sse(stream),
         media_type="text/event-stream",

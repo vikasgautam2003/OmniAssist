@@ -1,8 +1,10 @@
 from app.clients.base import LLMClient, LLMError
-from app.config import settings
+from app.config import get_settings
 
 
 def get_llm_client() -> LLMClient:
+    settings = get_settings()
+
     if settings.llm_provider == "groq":
         from app.clients.groq_client import GroqClient
 
