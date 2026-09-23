@@ -11,7 +11,7 @@
 
 | Version | Adds | Status |
 |---|---|---|
-| **v0.1** | Streaming chatbot with history | 🔄 in progress |
+| **v0.1** | Streaming chatbot with history | ✅ **shipped** |
 | v0.2 | Postgres, auth, PDF upload + RAG, pytest | ⬜ |
 | v0.3 | Tool-use framework, Redis cache, Celery jobs, structured logging | ⬜ |
 | v0.4 | Multi-tenancy, RBAC, Docker, AWS deploy, CD | ⬜ |
@@ -26,7 +26,7 @@
 | 3 | Streaming | ✅ |
 | 4 | FastAPI + SSE + conversation history | ✅ |
 | 5 | Streamlit UI | ✅ |
-| 6 | GitHub Actions CI + README + tag `v0.1` | ⬜ |
+| 6 | GitHub Actions CI + README + tag `v0.1` | ✅ |
 
 ---
 
@@ -207,9 +207,35 @@ uv run streamlit run ui/streamlit_app.py             # terminal 2
 2. "What number did you stop at?" → answers 5
 3. Refresh → new `conversation_id`; the old conversation is stranded in server memory forever (that's what v0.2's database fixes)
 
-## ⬜ BLOCK 6 — CI + release
+## ✅ BLOCK 6 — CI + README + release
 
-GitHub Actions: `ruff format --check` → `ruff check` → `mypy`. Must run **without a live API key**. Then README, learn sheet, tag `v0.1`.
+**Goal:** the quality gate runs on a machine, not on discipline.
+
+**Files**
+
+| File | Purpose |
+|---|---|
+| `.github/workflows/ci.yml` | format → lint → types, on push to main and every PR |
+| `README.md` | problem, architecture, quickstart, API, what's deliberately missing |
+
+**Key points**
+- `uv sync --locked` installs **exactly** `uv.lock` and **fails if the lock is stale** — nobody can add a dependency without committing the lockfile (D2's payoff)
+- **No secrets in the workflow.** None of the three tools imports the code, so no API key is needed (D5) — verified locally with `.env` moved away
+- Triggers on **both** `push: main` and `pull_request`: the PR run catches problems before merge, the main run records whether main is healthy
+- Three **named** steps, not one combined command — a failure shows as `Lint ✗` instead of a log to scan
+- Tag with `git tag -a v0.1`: branches move, tags don't. v0.4's pipeline deploys and rolls back to tags — **you can't roll back to a branch**
+
+**Verify**
+```bash
+uv sync --locked
+mv .env .env.bak
+env -u LLM_API_KEY -u GROQ_API_KEY sh -c '
+uv run ruff format --check app/ tests/ ui/
+uv run ruff check app/ tests/ ui/
+uv run mypy app/ tests/ ui/'
+mv .env.bak .env
+gh run list --limit 2       # both runs green
+```
 
 ---
 

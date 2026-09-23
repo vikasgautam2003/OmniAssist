@@ -1,6 +1,6 @@
 # 📚 OmniAssist — LEARN SHEET
 
-**Owner:** Vikas · **Started:** 2026-08-02 · **Current version:** v0.1 · **Current block:** Blocks 1–3 ✅ complete → Block 4 (FastAPI + SSE + history) next
+**Owner:** Vikas · **Started:** 2026-08-02 · **Current version:** v0.1 · **Status:** 🎉 **v0.1 SHIPPED** — all 6 blocks complete, CI green, tagged `v0.1`
 
 > Every concept learned, every decision made, and *why*. Append-only — superseded entries are struck through, never deleted, because the reasoning trail is worth more than a tidy document.
 
@@ -22,6 +22,8 @@
 | **D10** | **v0.1 runs on Groq free tier — `llama-3.3-70b-versatile`** | Budget is $0. Groq = ~1,000 req/day, 30 RPM, **no credit card, ongoing**; Anthropic has no free tier. v0.1 needs ~200 requests total. ⚠️ **Groq ≠ Grok** — Groq is an inference provider serving open-weight models (free); Grok is xAI's model ($25 credits then paid). Config is provider-neutral: `LLM_PROVIDER` / `LLM_API_KEY` / `LLM_MODEL`. | Yes — that's the point of D8 |
 | **D11** | **Conversation history must be trimmed** (Block 4), not left unbounded | Groq's free tier caps ~**14,400 tokens/minute**. Per C10, a 40-turn conversation is ~40K tokens in *one* request — over the entire per-minute budget. **A limit that makes you build it right beats unlimited quota that lets you build it wrong.** | No |
 | **D13** | **Model switched to `openai/gpt-oss-120b`** on Groq | Changed by editing **one line of `.env`** — zero code changes. Live proof that D3 + D8 work. | Yes — one line |
+| **D14** | **Interrupted streams save nothing** (option A) — a disconnect mid-reply leaves the user message with no assistant reply | Only complete assistant responses are stored; a partial must never be recorded as if it were whole. **Accepted consequence:** history can hold a dangling user turn, so the model may see two user messages in a row. The production refinement (roll back the user message on `GeneratorExit`, keeping history strictly alternating) is logged for v0.2. | Yes |
+| **D15** | Streamlit entrypoint is **`ui/streamlit_app.py`**, not `ui/app.py` | `ui/app.py` resolves to a module named `app`, colliding with the `app/` package; mypy refuses to check either. **Renaming beats configuring around it** — `--exclude ui` would have silenced type checking on a whole directory of real code. | Yes |
 | **D12** | **The git repo is rooted at the project, not the parent folder** | Learned the hard way — `git init` had landed at `projects/`, mixing study notes with product code. See C13. | No |
 
 ---
@@ -284,6 +286,79 @@ Why it matters: Block 4 accumulates streamed chunks into history. A test on the 
 
 Decide what a value *means in context* before deciding what to do with it. That judgement is most of what separates correct code from merely defensive code.
 
+### C30 — Server-Sent Events: the whole protocol, and its three traps
+SSE is **an ordinary HTTP response that never ends**: `Content-Type: text/event-stream`, then `data: <payload>\n\n` per event. A **blank line terminates an event**. That's it.
+
+**Why SSE over WebSockets here:** token streaming is one-directional. SSE is plain HTTP (proxies, LBs and CDNs pass it), browsers reconnect automatically, and there's no upgrade handshake. WebSockets buy bidirectionality we don't need and cost infrastructure config in v0.4. *Pick the least powerful tool that solves the problem — it has the fewest failure modes.*
+
+Three traps, all hit or avoided in Block 4:
+
+1. **🔴 Payloads must be JSON-encoded.** Model output is full of newlines. A raw `data: hello\nworld\n\n` becomes **two malformed events** — the client sees a truncated reply and blames the model. `json.dumps(chunk)` escapes the newline inside a quoted string so the frame stays one line. Seen live in our own output: `data: "  \n"`.
+2. **`[DONE]` sentinel.** SSE has no end-of-stream marker, so the client can't distinguish "finished" from "connection dropped." Convention borrowed from OpenAI's API.
+3. **`X-Accel-Buffering: no`.** Without it nginx buffers the whole response and delivers it at the end — **streaming silently stops working only in production**, the worst place to find out.
+
+Also: never buffer server-side. Collecting all chunks then returning them is a slow non-streaming endpoint with extra steps.
+
+### C31 — A health check must be cheap, or it becomes the load
+It is tempting to have `/healthz` verify the LLM is reachable. Do the arithmetic first:
+
+> A load balancer probes every **10 seconds** = **8,640 requests/day**. The Groq free tier is ~**1,000/day**.
+> **The health check alone would exhaust the entire quota eight times over, serving zero users.**
+
+This is C5 with a price tag. Split the two questions:
+
+| Probe | Question | On failure |
+|---|---|---|
+| **Liveness** (`/healthz`) | Is the process alive? | Restart the container |
+| **Readiness** (`/readyz`, v0.4) | Can I serve traffic *right now*? | Remove from the LB — **don't** restart |
+
+### C32 — Trim what you *send*; keep what you *store*
+`trimmed = history[-max_history:]` is a **slice, not a mutation**. Verified: 12 messages stored, 4 sent. Trimming bounds the request payload; it is not forgetting.
+
+Two things to know about the choice:
+- **Message count is a proxy for token count.** The real limit is ~14,400 tokens/min (D11) and messages vary wildly in length. Proper token counting needs a tokenizer — deferred to v0.3 with observability. *Know you chose a proxy, and why.*
+- **A naive window can start mid-exchange.** Our trimmed payload opened with an `assistant` message — from the model's view, it spoke first, unprompted. Same family as D14's dangling user turn: **don't send the model state that couldn't occur in a real conversation.**
+
+### C33 — Streamlit re-runs the entire script on every interaction
+Every click, every message, every widget change re-executes the file from line 1.
+
+| | Consequence |
+|---|---|
+| Module-level code | **Runs again each time** — an API call there fires per click (C10, with a bill) |
+| Local variables | **Wiped** — history vanishes every message |
+| `st.session_state` | The only thing that survives; holds `conversation_id` and `messages` |
+
+Corollary: past messages must be **redrawn** on every run — Streamlit doesn't remember what it painted. Also `timeout=None` on the streaming HTTP call, since a default timeout kills long replies mid-flight.
+
+### C34 — Syntactically valid dead code is harder than a crash
+The Streamlit page rendered a title and nothing else — **no error**. The entire `st.chat_input` block had been indented one level, nesting it inside a function that merely got *defined*. Valid Python, never executed.
+
+> **Diagnostic: when a script "does nothing," list its module-level statements** (`ast.parse(...).body`). If the thing you expected to run isn't there, it's nested inside something.
+
+A crash tells you where to look. Silent dead code tells you nothing — which is why this class of bug eats hours.
+
+### C35 — Fix the name, don't configure around the collision
+`ui/app.py` and the `app/` package both resolve to a module named `app`; mypy refused to check either and suggested `--exclude`, `__init__.py`, or `--explicit-package-bases`.
+
+**All three suppress the symptom.** Renaming to `ui/streamlit_app.py` removes the cause, and is a better name anyway. `--exclude ui` would have disabled type checking across a whole directory of real code — **a config flag that silences a checker is a liability you'll forget you added.**
+
+### C36 — `uv sync --locked` turns reproducibility into an enforced rule
+The flag installs **exactly** `uv.lock` and **fails the build if the lock is out of date** with `pyproject.toml`.
+
+Two guarantees that follow:
+- CI cannot quietly resolve different versions than your laptop has
+- Nobody can add a dependency without committing the lockfile
+
+This is D2's payoff arriving: the reason for choosing `uv` was never speed, it was the lock. **A convention enforced by a machine is a rule; one enforced by discipline is a suggestion.**
+
+### C37 — Tags are immutable; branches move
+`v0.1` is a permanent pointer to one commit. `main` will keep moving; the tag won't.
+
+Why it matters concretely:
+- `git diff v0.1..HEAD` tells you exactly what changed since a known-good state — essential when a v0.2 migration breaks something
+- It makes v0.2 an *evolution* of a shipped release rather than a rewrite (D1)
+- In v0.4 the deploy pipeline deploys and rolls back to **tags** — **you cannot roll back to a branch**
+
 ---
 
 ## 📊 REFERENCE — LLM API pricing (2026-08-02)
@@ -366,6 +441,27 @@ Final: mypy clean, ruff clean, live call returns `OK`, fake works with no `.env`
 
 Design question answered correctly: separate `stream_chat()` over a `stream: bool` flag → C25.
 
+**Block 4 review — 2 findings**
+
+| Finding | Outcome |
+|---|---|
+| Trimmed window can open with an `assistant` message (state that can't occur in a real conversation) | Logged for v0.2 → C32 |
+| First chunk is `""` — passes the `is not None` guard and emits a useless SSE frame | Logged → C30 |
+
+Design questions answered 4/4, including the interrupted-stream policy (→ D14).
+
+**Block 5 review — 1 finding**
+
+| Finding | Outcome |
+|---|---|
+| 🔴 Whole chat block indented inside `stream_reply()` — valid syntax, never executed, no error shown | Dedented; AST diagnostic learned → C34 |
+
+Plus a module-name collision caught by mypy → C35 / D15.
+
+**Block 6 — CI verified**
+
+`ruff format --check`, `ruff check` and `mypy` all pass **with no `.env` and no API key present** — D5 proven, not assumed. `uv sync --locked` confirms the lockfile is in sync. Two green CI runs (PR + main), ~35s each.
+
 ---
 
 ## 🧱 BLOCK PROGRESS — v0.1
@@ -375,9 +471,9 @@ Design question answered correctly: separate `stream_chat()` over a `stream: boo
 | **1 — Repo skeleton + config & secrets** | ✅ **COMPLETE** (2026-08-02) — 8/8 steps · commit `6e40a75` · [github.com/vikasgautam2003/OmniAssist](https://github.com/vikasgautam2003/OmniAssist) |
 | **2 — LLM client (D8 interface + GroqClient + factory + fake)** | ✅ **COMPLETE** (2026-08-02) |
 | **3 — Streaming** | ✅ **COMPLETE** (2026-08-02) |
-| 4 — FastAPI + SSE + history *(includes D11 trimming)* | 🔜 **NEXT** |
-| 5 — Streamlit UI | ⬜ |
-| 6 — GitHub Actions CI + README + tag `v0.1` | ⬜ |
+| **4 — FastAPI + SSE + history** | ✅ **COMPLETE** |
+| **5 — Streamlit UI** | ✅ **COMPLETE** |
+| **6 — CI + README + tag `v0.1`** | ✅ **COMPLETE** |
 
 ---
 
@@ -395,3 +491,7 @@ Design question answered correctly: separate `stream_chat()` over a `stream: boo
 | 2026-08-02 | `~/Downloads/OmniAssist_Project_Synopsis.docx` generated in the college template format (5 sections, 15 references, 2,799 words) |
 | 2026-08-02 | **Block 2 COMPLETE** — `app/clients/{base,groq_client,factory}.py` + `tests/fakes.py`; `LLMClient` Protocol, `LLMError`, composition root, keyless fake; mypy + pydantic plugin configured; concepts C20–C24 |
 | 2026-08-02 | **Block 3 COMPLETE** — `stream_chat()` on the Protocol, `GroqClient` (stream=True, `delta.content`, None-skipped), faithful chunking fake with eager/lazy split; concepts C25–C29 |
+| 2026-09-22 | **Block 4 COMPLETE** — `POST /chat/{id}` SSE endpoint, `GET /healthz`, `ChatService` with history + trimming; concepts C30–C32, decision D14 |
+| 2026-09-22 | **Block 5 COMPLETE** — `ui/streamlit_app.py` chat UI consuming SSE; concepts C33–C35, decision D15 |
+| 2026-09-22 | **Block 6 COMPLETE** — GitHub Actions CI (format/lint/types, no API key), README; concepts C36–C37 |
+| 2026-09-22 | **🎉 v0.1 SHIPPED** — 6/6 blocks, CI green, tagged `v0.1` |
