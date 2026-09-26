@@ -1,26 +1,34 @@
 from collections.abc import Iterator
 
 from app.clients.base import LLMClient, Message
+from app.repositories.base import ConversationRepository
 
 
 class ChatService:
-    def __init__(self, client: LLMClient, max_history: int = 10) -> None:
+    def __init__(
+        self,
+        client: LLMClient,
+        repository: ConversationRepository,
+        max_history: int = 10,
+    ) -> None:
         self._client = client
-        self._store: dict[str, list[Message]] = {}
+        self._repository = repository
         self._max_history = max_history
 
     def stream_reply(self, conversation_id: str, user_message: str) -> Iterator[str]:
 
-        history = self._store.setdefault(conversation_id, [])
-
-        history.append(
+        self._repository.add_message(
+            conversation_id,
             {
                 "role": "user",
                 "content": user_message,
-            }
+            },
         )
 
-        trimmed = history[-self._max_history :]
+        trimmed = self._repository.get_history(
+            conversation_id,
+            limit=self._max_history,
+        )
 
         pieces: list[str] = []
 
@@ -28,7 +36,13 @@ class ChatService:
             pieces.append(chunk)
             yield chunk
 
-        history.append({"role": "assistant", "content": "".join(pieces)})
+        self._repository.add_message(
+            conversation_id,
+            {
+                "role": "assistant",
+                "content": "".join(pieces),
+            },
+        )
 
     def get_history(self, conversation_id: str) -> list[Message]:
-        return list(self._store.get(conversation_id, []))
+        return self._repository.get_history(conversation_id)
