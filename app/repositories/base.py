@@ -1,6 +1,6 @@
 from typing import Protocol
 
-from app.clients.base import Message
+from app.domain import Message
 
 
 class ConversationRepository(Protocol):

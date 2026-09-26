@@ -1,6 +1,6 @@
 from collections.abc import Iterator
 
-from app.clients.base import Message
+from app.domain import Message
 
 
 class FakeLLMClient:

@@ -2,7 +2,7 @@ from tests.conftest import ServiceFactory
 
 
 def test_reply_is_streamed_back(make_service: ServiceFactory) -> None:
-    service, fake = make_service("Hello there?")
+    service, _fake = make_service("Hello there?")
 
     reply = "".join(service.stream_reply("c1", "hi"))
 
@@ -38,7 +38,7 @@ def test_trimming_limits_what_is_sent(make_service: ServiceFactory) -> None:
 
 
 def test_full_history_is_retained_while_trimming(make_service: ServiceFactory) -> None:
-    service, fake = make_service("reply", max_history=4)
+    service, _fake = make_service("reply", max_history=4)
 
     for i in range(6):
         "".join(service.stream_reply("c1", f"message {i}"))
@@ -49,7 +49,7 @@ def test_full_history_is_retained_while_trimming(make_service: ServiceFactory) -
 
 
 def test_get_history_returns_a_copy(make_service: ServiceFactory) -> None:
-    service, fake = make_service("reply")
+    service, _fake = make_service("reply")
 
     "".join(service.stream_reply("c1", "hello"))
 

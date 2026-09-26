@@ -1,4 +1,4 @@
-from app.clients.base import Message
+from app.domain import Message
 
 
 class InMemoryConversationRepository:

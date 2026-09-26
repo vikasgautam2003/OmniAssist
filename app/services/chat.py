@@ -1,6 +1,7 @@
 from collections.abc import Iterator
 
-from app.clients.base import LLMClient, Message
+from app.clients.base import LLMClient
+from app.domain import Message
 from app.repositories.base import ConversationRepository
 
 
