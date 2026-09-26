@@ -1,3 +1,4 @@
+from functools import lru_cache
 from typing import Literal
 
 from pydantic import SecretStr
@@ -18,4 +19,13 @@ class Settings(BaseSettings):
     app_env: Literal["local", "staging", "production"] = "local"
 
 
-settings = Settings()
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    """Build and cache the settings object.
+
+    Deliberately not called at import time: importing a module must have no
+    side effects, so tests and CI can import the app without any credentials.
+    Validation is triggered explicitly at application startup (see main.py),
+    which keeps fail-fast behaviour where it belongs.
+    """
+    return Settings()
