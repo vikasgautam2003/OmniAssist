@@ -1,6 +1,7 @@
 # 📚 OmniAssist — LEARN SHEET
 
-**Owner:** Vikas · **Started:** 2026-08-02 · **Current version:** v0.1 · **Status:** 🎉 **v0.1 SHIPPED** — all 6 blocks complete, CI green, tagged `v0.1`
+**Owner:** Vikas · **Started:** 2026-08-02 · **Current version:** v0.1 · **Status:** v0.1 shipped ✅ · **v0.2 in progress** — Block 1 (tests) complete
+**v0.1:** 🎉 **SHIPPED** — all 6 blocks complete, CI green, tagged `v0.1`
 
 > Every concept learned, every decision made, and *why*. Append-only — superseded entries are struck through, never deleted, because the reasoning trail is worth more than a tidy document.
 
@@ -22,6 +23,7 @@
 | **D10** | **v0.1 runs on Groq free tier — `llama-3.3-70b-versatile`** | Budget is $0. Groq = ~1,000 req/day, 30 RPM, **no credit card, ongoing**; Anthropic has no free tier. v0.1 needs ~200 requests total. ⚠️ **Groq ≠ Grok** — Groq is an inference provider serving open-weight models (free); Grok is xAI's model ($25 credits then paid). Config is provider-neutral: `LLM_PROVIDER` / `LLM_API_KEY` / `LLM_MODEL`. | Yes — that's the point of D8 |
 | **D11** | **Conversation history must be trimmed** (Block 4), not left unbounded | Groq's free tier caps ~**14,400 tokens/minute**. Per C10, a 40-turn conversation is ~40K tokens in *one* request — over the entire per-minute budget. **A limit that makes you build it right beats unlimited quota that lets you build it wrong.** | No |
 | **D13** | **Model switched to `openai/gpt-oss-120b`** on Groq | Changed by editing **one line of `.env`** — zero code changes. Live proof that D3 + D8 work. | Yes — one line |
+| **D16** | **Tests come before the database**, not after | v0.2 Block 2 replaces the in-memory store with PostgreSQL — surgery on the core. Tests written against *current* behaviour are a characterisation: they pin down what works today so the refactor can't silently change it. Writing them afterwards means verifying the new thing against nothing. *"Changing existing code safely — tests as the safety net."* | No |
 | **D14** | **Interrupted streams save nothing** (option A) — a disconnect mid-reply leaves the user message with no assistant reply | Only complete assistant responses are stored; a partial must never be recorded as if it were whole. **Accepted consequence:** history can hold a dangling user turn, so the model may see two user messages in a row. The production refinement (roll back the user message on `GeneratorExit`, keeping history strictly alternating) is logged for v0.2. | Yes |
 | **D15** | Streamlit entrypoint is **`ui/streamlit_app.py`**, not `ui/app.py` | `ui/app.py` resolves to a module named `app`, colliding with the `app/` package; mypy refuses to check either. **Renaming beats configuring around it** — `--exclude ui` would have silenced type checking on a whole directory of real code. | Yes |
 | **D12** | **The git repo is rooted at the project, not the parent folder** | Learned the hard way — `git init` had landed at `projects/`, mixing study notes with product code. See C13. | No |
@@ -359,6 +361,36 @@ Why it matters concretely:
 - It makes v0.2 an *evolution* of a shipped release rather than a rewrite (D1)
 - In v0.4 the deploy pipeline deploys and rolls back to **tags** — **you cannot roll back to a branch**
 
+### C38 — Test behaviour, not implementation
+```python
+assert len(fake.calls[-1]) == 3          # ✅ what the provider received
+assert service._store["c1"] == [...]     # ❌ reaching into private state
+```
+The first survives the PostgreSQL migration; the second breaks the moment `_store` stops being a dict — and a "safety net" that breaks during the refactor it was built for is just noise you have to fix while already mid-surgery.
+
+Corollary: **don't test the library.** Not that pydantic validates or that FastAPI routes — only your own logic (history accumulates, trimming caps the payload, the full conversation survives).
+
+The trimming case is deliberately **two** tests, not one: the first asserts the cap, the second asserts the cap wasn't achieved by *deleting* data. Merged into a single test, you'd likely assert only the half you were thinking about.
+
+### C39 — Accessors must not hand out internal state
+`get_history` returned `self._store.get(cid, [])` — **the live list**. Proven: a caller appended to it and corrupted the service's history from outside.
+
+**Why it's a migration landmine, not just poor style:** when `_store` becomes a SQL query, `get_history` will build a *fresh list from rows* and mutation will do nothing. Any code that accidentally relies on the leak keeps working until the database lands, then fails in a way that looks unrelated to the migration.
+
+> **Make the in-memory version behave the way the database version will, so the swap is invisible.** Today's shortcut is tomorrow's migration bug.
+
+Fix: `return list(...)`.
+
+### C40 — Regression tests exist to stop a fixed bug coming back
+`test_get_history_returns_a_copy` proves nothing about the feature — it exists solely so nobody reintroduces the leak. A bug found once is a bug worth pinning; the fix is cheap now and invisible later.
+
+### C41 — A half-declared package breaks static analysis
+mypy: *"Source file found twice under different module names: `fakes` and `tests.fakes`."* With no `__init__.py`, `tests/fakes.py` was a top-level module `fakes`; the import `from tests.fakes import ...` made it `tests.fakes` as well. One file, two identities.
+
+mypy offered `--explicit-package-bases` and `MYPYPATH`. Both configure around it. The real problem was that `tests/` was being *used* as a package without being *declared* as one — `touch tests/__init__.py` fixed the cause. Same principle as C35.
+
+*(Shell aside: zsh does not treat `#` as a comment interactively by default, so a pasted trailing comment becomes pytest arguments. `setopt interactive_comments` fixes it.)*
+
 ---
 
 ## 📊 REFERENCE — LLM API pricing (2026-08-02)
@@ -495,3 +527,4 @@ Plus a module-name collision caught by mypy → C35 / D15.
 | 2026-09-22 | **Block 5 COMPLETE** — `ui/streamlit_app.py` chat UI consuming SSE; concepts C33–C35, decision D15 |
 | 2026-09-22 | **Block 6 COMPLETE** — GitHub Actions CI (format/lint/types, no API key), README; concepts C36–C37 |
 | 2026-09-22 | **🎉 v0.1 SHIPPED** — 6/6 blocks, CI green, tagged `v0.1` |
+| 2026-09-26 | **v0.2 Block 1 COMPLETE** — pytest configured, 5 tests on `ChatService` running with no key; `get_history` returns a copy; `self._client` made private; `tests/__init__.py` added; pytest wired into CI. Concepts C38–C41, decision D16 |

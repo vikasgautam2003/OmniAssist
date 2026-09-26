@@ -12,7 +12,7 @@
 | Version | Adds | Status |
 |---|---|---|
 | **v0.1** | Streaming chatbot with history | ✅ **shipped** |
-| v0.2 | Postgres, auth, PDF upload + RAG, pytest | ⬜ |
+| v0.2 | Postgres, auth, PDF upload + RAG, pytest | 🔄 in progress |
 | v0.3 | Tool-use framework, Redis cache, Celery jobs, structured logging | ⬜ |
 | v0.4 | Multi-tenancy, RBAC, Docker, AWS deploy, CD | ⬜ |
 | v1.0 | Monitoring, alerting, LLM evals, load testing, cost tracking | ⬜ |
@@ -235,6 +235,45 @@ uv run ruff check app/ tests/ ui/
 uv run mypy app/ tests/ ui/'
 mv .env.bak .env
 gh run list --limit 2       # both runs green
+```
+
+---
+
+## ✅ v0.2 · BLOCK 1 — pytest and the safety net
+
+**Goal:** lock down current behaviour *before* the storage layer is replaced.
+
+```bash
+uv add --dev pytest pytest-cov
+touch tests/__init__.py
+```
+
+```toml
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"
+```
+
+**Files**
+
+| File | Purpose |
+|---|---|
+| `tests/test_chat_service.py` | 5 tests: streaming, history accumulation, trimming cap, full-history retention, copy-on-read |
+| `tests/__init__.py` | makes `tests` a real package — without it mypy sees `fakes` and `tests.fakes` as two modules |
+| `.github/workflows/ci.yml` | `Tests` step added |
+
+**Key points**
+- Tests use `FakeLLMClient` — **no network, no key, ~0.01s**; verified passing with `.env` moved away
+- Assert on **what the provider received** (`fake.calls[-1]`), never on `service._store` — implementation assertions break during the very refactor they should protect
+- Trimming gets **two** tests: one for the cap, one proving the cap wasn't achieved by deleting data
+- `get_history()` returns `list(...)` — a copy. The live list let callers corrupt internal state, and would have behaved differently once backed by SQL
+- `pythonpath = ["."]` so `app.*` and `tests.*` both resolve without `sys.path` hacks in test files
+
+**Verify**
+```bash
+uv run pytest
+mv .env .env.bak && env -u LLM_API_KEY uv run pytest; mv .env.bak .env
 ```
 
 ---
