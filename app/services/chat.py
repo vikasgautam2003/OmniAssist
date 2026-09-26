@@ -5,7 +5,7 @@ from app.clients.base import LLMClient, Message
 
 class ChatService:
     def __init__(self, client: LLMClient, max_history: int = 10) -> None:
-        self.client = client
+        self._client = client
         self._store: dict[str, list[Message]] = {}
         self._max_history = max_history
 
@@ -24,8 +24,11 @@ class ChatService:
 
         pieces: list[str] = []
 
-        for chunk in self.client.stream_chat(trimmed):
+        for chunk in self._client.stream_chat(trimmed):
             pieces.append(chunk)
             yield chunk
 
         history.append({"role": "assistant", "content": "".join(pieces)})
+
+    def get_history(self, conversation_id: str) -> list[Message]:
+        return list(self._store.get(conversation_id, []))
