@@ -23,6 +23,8 @@
 | **D10** | **v0.1 runs on Groq free tier — `llama-3.3-70b-versatile`** | Budget is $0. Groq = ~1,000 req/day, 30 RPM, **no credit card, ongoing**; Anthropic has no free tier. v0.1 needs ~200 requests total. ⚠️ **Groq ≠ Grok** — Groq is an inference provider serving open-weight models (free); Grok is xAI's model ($25 credits then paid). Config is provider-neutral: `LLM_PROVIDER` / `LLM_API_KEY` / `LLM_MODEL`. | Yes — that's the point of D8 |
 | **D11** | **Conversation history must be trimmed** (Block 4), not left unbounded | Groq's free tier caps ~**14,400 tokens/minute**. Per C10, a 40-turn conversation is ~40K tokens in *one* request — over the entire per-minute budget. **A limit that makes you build it right beats unlimited quota that lets you build it wrong.** | No |
 | **D13** | **Model switched to `openai/gpt-oss-120b`** on Groq | Changed by editing **one line of `.env`** — zero code changes. Live proof that D3 + D8 work. | Yes — one line |
+| **D25** | **Minimum password length 12, no composition rules** | Current NIST guidance: length is what matters. Forcing uppercase/digit/symbol produces `Password1!` and a sticky note — it reduces entropy by making passwords predictable while feeling stricter. | Yes |
+| **D24** | **React/Next.js stays at v0.4**, Streamlit until then | Streamlit already proves the backend end to end, and the API is UI-agnostic (SSE + JSON), so swapping clients is replacing one consumer rather than rewriting anything. Building login screens now against an auth model that multi-tenancy will change in v0.4 means building them twice. | Yes |
 | **D23** | **Email normalised (lowercased + stripped) at the Pydantic boundary**, once | Domains are case-insensitive and no real provider treats local parts as distinct, so `Vikas@x.com` and `vikas@x.com` must be one account. Normalising in each route handler means two copies that drift — and the classic bug is signup lowercasing while login doesn't, creating an account the user can never reach. Every entry point goes through a request schema, so the schema is the one place. | No |
 | **D22** | **JWT over server-side sessions** | A session means a table lookup on every request — shared state, which is exactly what Block 2 removed. A JWT validates with no database round-trip, so any worker can authenticate any request in v0.4. Cost: tokens can't be revoked before expiry, hence short lifetimes. | Yes |
 | **D21** | **UUID primary key for `users`; integers stay elsewhere** | An integer in a URL is enumerable (`/users/1,2,3…`), leaks total user count, and reveals signup order. `MessageRow.id` stays an integer because it never appears externally. **The rule is "UUID for anything exposed", not "UUID always."** | No |
@@ -507,6 +509,29 @@ Two migrations named "create users" (one empty) were collapsed into one: roll ba
 
 That rewrite was safe **only because nothing had been pushed and nobody else had migrated.** Once a migration is on `main` and someone's database has recorded it, the history is immutable — you fix forward with a new migration instead. **Know which side of that line you're on before you edit a revision file.**
 
+### C57 — User enumeration: identical errors are not enough
+A login endpoint that distinguishes *"no such user"* from *"wrong password"* is a **free account-checking tool** for anyone with an email list — which matters enormously for a health, finance or dating service. So both failures return the same 401 and the same message.
+
+**But the message is not the only observable.** An attacker doesn't read your error, they **time it**:
+
+| Path | Work done | Time |
+|---|---|---|
+| Email exists, password wrong | DB lookup + argon2 verify | ~53 ms |
+| Email unknown | DB lookup, return early | **~2 ms** |
+
+A 25× difference, measurable over a handful of requests, and the identical message is worthless.
+
+**Fix: always do the same work.** Verify against a throwaway hash when the user is missing, so both paths cost the same. Measured after the fix: **53 ms vs 56 ms — indistinguishable.**
+
+> **Security is about everything observable — timing, response size, which errors occur, how many queries ran — not only what you return.** This class of bug passes every test and every code review, and is found with a stopwatch.
+
+Related: the dummy hash is computed **lazily** (`lru_cache`), not at module scope — importing a module should never burn 50 ms of CPU.
+
+### C58 — A response model is a filter, not documentation
+`TokenResponse` declares exactly two fields, and FastAPI serialises **only** those. Even if a handler accidentally returned a `User`, `password_hash` could not reach the wire.
+
+Compare the alternative — returning a dict and trusting every current and future handler to omit the sensitive fields. **Make the leak structurally impossible rather than relying on everyone remembering.** Same instinct as `SecretStr` (C14) and `frozen=True` (C39).
+
 ---
 
 ## 📊 REFERENCE — LLM API pricing (2026-08-02)
@@ -646,3 +671,4 @@ Plus a module-name collision caught by mypy → C35 / D15.
 | 2026-09-26 | **v0.2 Block 1 COMPLETE** — pytest configured, 5 tests on `ChatService` running with no key; `get_history` returns a copy; `self._client` made private; `tests/__init__.py` added; pytest wired into CI. Concepts C38–C41, decision D16 |
 | 2026-10-03 | **v0.2 Block 2 COMPLETE** — PostgreSQL 17 + pgvector, SQLAlchemy models, Alembic migration (reversibility verified), `PostgresConversationRepository` with atomic upsert, repository Protocol, `app/domain.py`. Cross-process persistence proven. Concepts C42–C49, decisions D17–D19 |
 | 2026-10-04 | **v0.2 Block 3 (auth) in progress** — argon2id password hashing, `users` table (UUID PK, unique email), JWT mint/verify with pinned algorithm, `User` domain type + `UserRepository` with `EmailAlreadyExistsError`. Concepts C50–C56, decisions D20–D23 |
+| 2026-10-04 | **Step 3.3c** — `POST /auth/signup` (201/409) and `/auth/login` (200/401) with email normalised once at the Pydantic boundary, identical errors for unknown-vs-wrong, and a constant-time failure path verified by measurement (53 ms vs 56 ms). Concepts C57–C58, decisions D24–D25 |
