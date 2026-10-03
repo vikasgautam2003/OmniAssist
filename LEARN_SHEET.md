@@ -1,6 +1,6 @@
 # 📚 OmniAssist — LEARN SHEET
 
-**Owner:** Vikas · **Started:** 2026-08-02 · **Current version:** v0.1 · **Status:** v0.1 shipped ✅ · **v0.2 in progress** — Blocks 1–2 complete (tests, PostgreSQL)
+**Owner:** Vikas · **Started:** 2026-08-02 · **Current version:** v0.1 · **Status:** v0.1 shipped ✅ · **v0.2 in progress** — Blocks 1–2 complete; Block 3 (auth) underway
 **v0.1:** 🎉 **SHIPPED** — all 6 blocks complete, CI green, tagged `v0.1`
 
 > Every concept learned, every decision made, and *why*. Append-only — superseded entries are struck through, never deleted, because the reasoning trail is worth more than a tidy document.
@@ -23,6 +23,12 @@
 | **D10** | **v0.1 runs on Groq free tier — `llama-3.3-70b-versatile`** | Budget is $0. Groq = ~1,000 req/day, 30 RPM, **no credit card, ongoing**; Anthropic has no free tier. v0.1 needs ~200 requests total. ⚠️ **Groq ≠ Grok** — Groq is an inference provider serving open-weight models (free); Grok is xAI's model ($25 credits then paid). Config is provider-neutral: `LLM_PROVIDER` / `LLM_API_KEY` / `LLM_MODEL`. | Yes — that's the point of D8 |
 | **D11** | **Conversation history must be trimmed** (Block 4), not left unbounded | Groq's free tier caps ~**14,400 tokens/minute**. Per C10, a 40-turn conversation is ~40K tokens in *one* request — over the entire per-minute budget. **A limit that makes you build it right beats unlimited quota that lets you build it wrong.** | No |
 | **D13** | **Model switched to `openai/gpt-oss-120b`** on Groq | Changed by editing **one line of `.env`** — zero code changes. Live proof that D3 + D8 work. | Yes — one line |
+| **D25** | **Minimum password length 12, no composition rules** | Current NIST guidance: length is what matters. Forcing uppercase/digit/symbol produces `Password1!` and a sticky note — it reduces entropy by making passwords predictable while feeling stricter. | Yes |
+| **D24** | **React/Next.js stays at v0.4**, Streamlit until then | Streamlit already proves the backend end to end, and the API is UI-agnostic (SSE + JSON), so swapping clients is replacing one consumer rather than rewriting anything. Building login screens now against an auth model that multi-tenancy will change in v0.4 means building them twice. | Yes |
+| **D23** | **Email normalised (lowercased + stripped) at the Pydantic boundary**, once | Domains are case-insensitive and no real provider treats local parts as distinct, so `Vikas@x.com` and `vikas@x.com` must be one account. Normalising in each route handler means two copies that drift — and the classic bug is signup lowercasing while login doesn't, creating an account the user can never reach. Every entry point goes through a request schema, so the schema is the one place. | No |
+| **D22** | **JWT over server-side sessions** | A session means a table lookup on every request — shared state, which is exactly what Block 2 removed. A JWT validates with no database round-trip, so any worker can authenticate any request in v0.4. Cost: tokens can't be revoked before expiry, hence short lifetimes. | Yes |
+| **D21** | **UUID primary key for `users`; integers stay elsewhere** | An integer in a URL is enumerable (`/users/1,2,3…`), leaks total user count, and reveals signup order. `MessageRow.id` stays an integer because it never appears externally. **The rule is "UUID for anything exposed", not "UUID always."** | No |
+| **D20** | **Argon2id over bcrypt** | Both are deliberately slow; Argon2id is additionally **memory-hard** (64 MiB per hash by default). bcrypt lets a GPU run thousands of guesses in parallel; Argon2id's memory cost means a 24 GB GPU manages ~375 instead of ~20,000. Current OWASP recommendation. `argon2-cffi` directly rather than a `pwdlib` wrapper — it already ships `check_needs_rehash()`. | Yes |
 | **D19** | **Integration tests against Postgres deferred to v0.3** | They need a real database in CI (GitHub Actions service containers), which is v0.3's scheduled work. Adding infrastructure mid-refactor breaks "one thing at a time". Unit tests run against the in-memory repository and genuinely constrain the Protocol both implementations honour. | Yes |
 | **D18** | **Alembic from the very first table** | `Base.metadata.create_all()` works exactly once — it can create tables, never alter them. A migration history with a gap at the start isn't a history. v0.4's deploy pipeline runs `alembic upgrade head` before starting a new version; that only works if every schema change is a script. | No |
 | **D17** | **Messages get their own table, not a JSON column on `conversations`** | JSON means loading the whole blob to read the last 10, rewriting everything to append one, and nowhere to attach per-message embeddings in Block 4. It would also make the `limit` parameter meaningless — the interface only pays off against a normalised schema. | No |
@@ -453,6 +459,79 @@ Related subtlety: to fetch the *last* N you must query `DESC ... LIMIT n` (so th
 ### C49 — Dead code keeps its dependencies alive and hides them from the linter
 After swapping to Postgres, `routes/chat.py` kept `repository = InMemoryConversationRepository()` — never read, but executed on every import. Ruff did **not** report the import as unused, *because the dead line used it.* One piece of dead code concealed another.
 
+### C50 — Password storage: three separate requirements
+**Hash, not encryption.** Encryption is reversible *by design* — there is a key, and whoever holds it gets plaintext: your backup, your logs, an attacker who steals the key alongside the database. A hash is one-way, **including for you**. And the people it protects most are your users, who reuse passwords elsewhere.
+
+**Slow, not fast.** SHA-256 *is* a hash and is wrong here, because it's designed to be fast — a GPU computes billions per second, so an attacker with your table brute-forces common passwords in minutes. You want a tunable work factor:
+
+| | one login | 1 billion guesses |
+|---|---|---|
+| SHA-256 | ~0.000001 s | **minutes** |
+| Argon2id (defaults) | ~0.04 s | **centuries** |
+
+Same user experience; completely different attacker economics. **You aren't making it impossible, you're making it unaffordable.**
+
+**Salted.** Without a per-user random value, identical passwords produce identical hashes — you can see which users share one, and precomputed rainbow tables work. Argon2 and bcrypt generate and embed the salt automatically.
+
+The hash string carries its own recipe: `$argon2id$v=19$m=65536,t=3,p=4$<salt>$<hash>`. That's how cost parameters can be raised next year while old hashes still verify, and what makes `check_needs_rehash()` possible.
+
+### C51 — Sequential IDs leak information
+An autoincrement primary key in a public URL tells an attacker three things for free: records are **enumerable** (`/users/1`, `/2`, `/3`…), the highest value is your **total user count**, and any ID reveals **signup order**. UUIDs leak none of it.
+
+The rule is not "always UUID" — `MessageRow.id` is an integer because it never leaves the database. **Match the key type to the exposure.**
+
+### C52 — A JWT is signed, not encrypted
+`header.payload.signature`, all base64. **Anyone holding the token can read the payload with no key** — verified by decoding one by hand. The signature proves *"this wasn't altered"*, never *"this is private."*
+
+> **Never put anything in a JWT you wouldn't print on a postcard.**
+
+**And pin the algorithm.** The classic attack is editing the header to `alg: none`, or swapping `RS256` for `HS256` so a *public* key is used as an HMAC secret. PyJWT requires an explicit `algorithms=[...]` list for exactly this reason. **Never let attacker-controlled input tell you how to verify it.**
+
+`sub` holds the user **id**, not the email — emails change; a token's subject must be immutable.
+
+### C53 — Stateless auth is C2 one layer up
+A server-side session means storing a session ID and querying it on every request — shared state. A JWT is self-contained, so **any worker can authenticate any request with no shared store and no database round-trip.**
+
+Sessions would have reintroduced precisely what moving conversation history to Postgres removed. The trade-off is real: a JWT **cannot be revoked before it expires**, which is why access tokens are short-lived.
+
+### C54 — mypy treats `...` as a stub body
+`def hash_password(password: str) -> str: ...` returns `None` and **mypy says nothing** — `...` is the convention for `.pyi` stubs and Protocol methods, so the return check is skipped. That's why `LLMClient.chat(...) -> str: ...` type-checks.
+
+An entire unimplemented function passed type checking. The only signal was ruff reporting an unused import. **Your linter caught what your type checker structurally cannot** — another reason both are in CI.
+
+### C55 — Autogenerate diffs models against the database
+`alembic revision --autogenerate` run *before* the model existed produced `def upgrade(): pass`. No model → no difference → nothing generated. It would have applied cleanly and created nothing.
+
+A compact restatement of C47: **autogenerate is a draft produced from what exists, not a thing that knows your intent.** Reading the file is the whole safeguard.
+
+### C56 — Migration history is append-only *once it's shared*
+Two migrations named "create users" (one empty) were collapsed into one: roll back, delete the file, re-point the next revision's `down_revision`, re-apply.
+
+That rewrite was safe **only because nothing had been pushed and nobody else had migrated.** Once a migration is on `main` and someone's database has recorded it, the history is immutable — you fix forward with a new migration instead. **Know which side of that line you're on before you edit a revision file.**
+
+### C57 — User enumeration: identical errors are not enough
+A login endpoint that distinguishes *"no such user"* from *"wrong password"* is a **free account-checking tool** for anyone with an email list — which matters enormously for a health, finance or dating service. So both failures return the same 401 and the same message.
+
+**But the message is not the only observable.** An attacker doesn't read your error, they **time it**:
+
+| Path | Work done | Time |
+|---|---|---|
+| Email exists, password wrong | DB lookup + argon2 verify | ~53 ms |
+| Email unknown | DB lookup, return early | **~2 ms** |
+
+A 25× difference, measurable over a handful of requests, and the identical message is worthless.
+
+**Fix: always do the same work.** Verify against a throwaway hash when the user is missing, so both paths cost the same. Measured after the fix: **53 ms vs 56 ms — indistinguishable.**
+
+> **Security is about everything observable — timing, response size, which errors occur, how many queries ran — not only what you return.** This class of bug passes every test and every code review, and is found with a stopwatch.
+
+Related: the dummy hash is computed **lazily** (`lru_cache`), not at module scope — importing a module should never burn 50 ms of CPU.
+
+### C58 — A response model is a filter, not documentation
+`TokenResponse` declares exactly two fields, and FastAPI serialises **only** those. Even if a handler accidentally returned a `User`, `password_hash` could not reach the wire.
+
+Compare the alternative — returning a dict and trusting every current and future handler to omit the sensitive fields. **Make the leak structurally impossible rather than relying on everyone remembering.** Same instinct as `SecretStr` (C14) and `frozen=True` (C39).
+
 ---
 
 ## 📊 REFERENCE — LLM API pricing (2026-08-02)
@@ -591,3 +670,5 @@ Plus a module-name collision caught by mypy → C35 / D15.
 | 2026-09-22 | **🎉 v0.1 SHIPPED** — 6/6 blocks, CI green, tagged `v0.1` |
 | 2026-09-26 | **v0.2 Block 1 COMPLETE** — pytest configured, 5 tests on `ChatService` running with no key; `get_history` returns a copy; `self._client` made private; `tests/__init__.py` added; pytest wired into CI. Concepts C38–C41, decision D16 |
 | 2026-10-03 | **v0.2 Block 2 COMPLETE** — PostgreSQL 17 + pgvector, SQLAlchemy models, Alembic migration (reversibility verified), `PostgresConversationRepository` with atomic upsert, repository Protocol, `app/domain.py`. Cross-process persistence proven. Concepts C42–C49, decisions D17–D19 |
+| 2026-10-04 | **v0.2 Block 3 (auth) in progress** — argon2id password hashing, `users` table (UUID PK, unique email), JWT mint/verify with pinned algorithm, `User` domain type + `UserRepository` with `EmailAlreadyExistsError`. Concepts C50–C56, decisions D20–D23 |
+| 2026-10-04 | **Step 3.3c** — `POST /auth/signup` (201/409) and `/auth/login` (200/401) with email normalised once at the Pydantic boundary, identical errors for unknown-vs-wrong, and a constant-time failure path verified by measurement (53 ms vs 56 ms). Concepts C57–C58, decisions D24–D25 |

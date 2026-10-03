@@ -13,6 +13,9 @@ class Settings(BaseSettings):
 
     database_url: str
 
+    jwt_secret: SecretStr
+    jwt_expire_minutes: int = 60
+
     llm_api_key: SecretStr
 
     llm_provider: Literal["groq", "anthropic"] = "groq"

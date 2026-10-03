@@ -278,6 +278,80 @@ mv .env .env.bak && env -u LLM_API_KEY uv run pytest; mv .env.bak .env
 
 ---
 
+## ✅ v0.2 · BLOCK 2 — PostgreSQL
+
+**Goal:** conversation history survives a restart, and lives outside the process.
+
+```bash
+brew install postgresql@17 pgvector && brew services start postgresql@17
+createdb omniassist && psql omniassist -c 'CREATE EXTENSION IF NOT EXISTS vector;'
+uv add sqlalchemy "psycopg[binary]" alembic
+uv run alembic init migrations
+```
+
+**Files**
+
+| File | Purpose |
+|---|---|
+| `app/domain.py` | `Message` — imports nothing, so a cycle is impossible |
+| `app/repositories/base.py` | `ConversationRepository` Protocol |
+| `app/repositories/memory.py` | in-memory implementation (unit tests) |
+| `app/repositories/postgres.py` | SQL implementation |
+| `app/db/models.py` | `Conversation`, `MessageRow` |
+| `app/db/session.py` | cached engine + session factory |
+| `migrations/` | Alembic; `env.py` reads the URL from `Settings` |
+
+**Key points**
+- **Two separate steps:** Protocol + in-memory first (a failing test means the *refactor* is wrong), then Postgres (a failing test means the *SQL* is wrong). Never both at once.
+- Separate `messages` table, not a JSON column — JSON means loading the whole blob to read ten rows and rewriting it to append one
+- `Index("ix_messages_conversation_created", "conversation_id", "created_at")` — every read is "this conversation, chronological, limited"
+- `server_default=func.now()` + `timezone=True` — the database owns the clock
+- `ON DELETE CASCADE` — the FK made a bug visible that the dict had hidden (it created parents implicitly)
+- `INSERT ... ON CONFLICT DO NOTHING` for the parent row: `SELECT`-then-`INSERT` is a check-then-act race
+- `ORDER BY created_at, id` — `now()` is the *transaction* start time, so timestamps alone are not a total order
+- Engine cached per process: an `Engine` owns a connection pool, one per request exhausts Postgres
+- `env.py` sets `sqlalchemy.url` from `Settings`, not `alembic.ini` — one source of truth, and no credential in version control
+
+**Verify**
+```bash
+uv run alembic upgrade head
+uv run alembic downgrade -1 && uv run alembic upgrade head   # reversibility
+psql -P pager=off omniassist -c '\d messages'
+```
+Then send a message in one Python process and read it back in **another** — that is the proof, not a restart.
+
+---
+
+## 🔄 v0.2 · BLOCK 3 — Authentication *(in progress)*
+
+**Goal:** conversations belong to someone. Until they do, anyone who guesses an ID reads another user's history.
+
+```bash
+uv add argon2-cffi pyjwt email-validator
+```
+
+**Files so far**
+
+| File | Purpose |
+|---|---|
+| `app/security/password.py` | `hash_password` / `verify_password` (argon2id) |
+| `app/security/tokens.py` | `create_access_token` / `decode_access_token` (HS256) |
+| `app/db/models.py` | `UserRow` — UUID PK, unique email |
+| `app/domain.py` | `User` frozen dataclass |
+| `app/repositories/{base,memory,postgres}.py` | `UserRepository` + `EmailAlreadyExistsError` |
+
+**Key points**
+- Argon2id, not bcrypt: **memory-hard**, which denies GPU parallelism rather than only slowing each guess
+- `verify_password` catches **only** `VerifyMismatchError`; `InvalidHashError` means corrupt data and must surface
+- UUID PK for users — integers in URLs are enumerable and leak user count and signup order
+- `unique=True` on email is the *guarantee*; the application's duplicate check is only the error message
+- A JWT is **signed, not encrypted** — the payload is readable without the key. Pin `algorithms=["HS256"]`; never let the token choose.
+- `EmailAlreadyExistsError` is raised by **both** repositories (Postgres translates `IntegrityError`), so no caller imports sqlalchemy and the fake stays behaviourally identical
+
+**Remaining:** 3.3c auth routes · 3.4 `get_current_user` dependency · 3.5 conversation ownership · 3.6 tests + Streamlit login
+
+---
+
 ## 🔁 STANDARD WORKFLOW (every block)
 
 ```bash
