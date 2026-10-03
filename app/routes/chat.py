@@ -7,6 +7,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.clients.factory import get_llm_client
+from app.repositories.postgres import PostgresConversationRepository
 from app.services.chat import ChatService
 
 router = APIRouter()
@@ -19,7 +20,7 @@ def get_chat_service() -> ChatService:
     Cached so conversation history survives between requests; lazy so that
     importing this module requires no credentials.
     """
-    return ChatService(get_llm_client())
+    return ChatService(get_llm_client(), PostgresConversationRepository())
 
 
 class ChatRequest(BaseModel):

@@ -1,6 +1,6 @@
 # 📚 OmniAssist — LEARN SHEET
 
-**Owner:** Vikas · **Started:** 2026-08-02 · **Current version:** v0.1 · **Status:** v0.1 shipped ✅ · **v0.2 in progress** — Block 1 (tests) complete
+**Owner:** Vikas · **Started:** 2026-08-02 · **Current version:** v0.1 · **Status:** v0.1 shipped ✅ · **v0.2 in progress** — Blocks 1–2 complete (tests, PostgreSQL)
 **v0.1:** 🎉 **SHIPPED** — all 6 blocks complete, CI green, tagged `v0.1`
 
 > Every concept learned, every decision made, and *why*. Append-only — superseded entries are struck through, never deleted, because the reasoning trail is worth more than a tidy document.
@@ -23,6 +23,9 @@
 | **D10** | **v0.1 runs on Groq free tier — `llama-3.3-70b-versatile`** | Budget is $0. Groq = ~1,000 req/day, 30 RPM, **no credit card, ongoing**; Anthropic has no free tier. v0.1 needs ~200 requests total. ⚠️ **Groq ≠ Grok** — Groq is an inference provider serving open-weight models (free); Grok is xAI's model ($25 credits then paid). Config is provider-neutral: `LLM_PROVIDER` / `LLM_API_KEY` / `LLM_MODEL`. | Yes — that's the point of D8 |
 | **D11** | **Conversation history must be trimmed** (Block 4), not left unbounded | Groq's free tier caps ~**14,400 tokens/minute**. Per C10, a 40-turn conversation is ~40K tokens in *one* request — over the entire per-minute budget. **A limit that makes you build it right beats unlimited quota that lets you build it wrong.** | No |
 | **D13** | **Model switched to `openai/gpt-oss-120b`** on Groq | Changed by editing **one line of `.env`** — zero code changes. Live proof that D3 + D8 work. | Yes — one line |
+| **D19** | **Integration tests against Postgres deferred to v0.3** | They need a real database in CI (GitHub Actions service containers), which is v0.3's scheduled work. Adding infrastructure mid-refactor breaks "one thing at a time". Unit tests run against the in-memory repository and genuinely constrain the Protocol both implementations honour. | Yes |
+| **D18** | **Alembic from the very first table** | `Base.metadata.create_all()` works exactly once — it can create tables, never alter them. A migration history with a gap at the start isn't a history. v0.4's deploy pipeline runs `alembic upgrade head` before starting a new version; that only works if every schema change is a script. | No |
+| **D17** | **Messages get their own table, not a JSON column on `conversations`** | JSON means loading the whole blob to read the last 10, rewriting everything to append one, and nowhere to attach per-message embeddings in Block 4. It would also make the `limit` parameter meaningless — the interface only pays off against a normalised schema. | No |
 | **D16** | **Tests come before the database**, not after | v0.2 Block 2 replaces the in-memory store with PostgreSQL — surgery on the core. Tests written against *current* behaviour are a characterisation: they pin down what works today so the refactor can't silently change it. Writing them afterwards means verifying the new thing against nothing. *"Changing existing code safely — tests as the safety net."* | No |
 | **D14** | **Interrupted streams save nothing** (option A) — a disconnect mid-reply leaves the user message with no assistant reply | Only complete assistant responses are stored; a partial must never be recorded as if it were whole. **Accepted consequence:** history can hold a dangling user turn, so the model may see two user messages in a row. The production refinement (roll back the user message on `GeneratorExit`, keeping history strictly alternating) is logged for v0.2. | Yes |
 | **D15** | Streamlit entrypoint is **`ui/streamlit_app.py`**, not `ui/app.py` | `ui/app.py` resolves to a module named `app`, colliding with the `app/` package; mypy refuses to check either. **Renaming beats configuring around it** — `--exclude ui` would have silenced type checking on a whole directory of real code. | Yes |
@@ -391,6 +394,65 @@ mypy offered `--explicit-package-bases` and `MYPYPATH`. Both configure around it
 
 *(Shell aside: zsh does not treat `#` as a comment interactively by default, so a pasted trailing comment becomes pytest arguments. `setopt interactive_comments` fixes it.)*
 
+### C42 — The Repository pattern, and the two-step refactor rule
+An object that looks like an in-memory collection to its caller while hiding whether the data lives in RAM or Postgres. `ChatService` depends on a Protocol — `get_history(cid, limit)` and `add_message(cid, msg)` — and never learns which implementation it got. Swapping storage engines was **one line in the composition root**.
+
+> **Never change the abstraction and the implementation in the same step.**
+
+| Step | Change | If a test fails |
+|---|---|---|
+| 2.3 | Protocol + in-memory impl; behaviour identical | the **refactor** is wrong |
+| 2.5 | Postgres impl; interface unchanged | the **SQL** is wrong |
+
+Both at once and a red test tells you nothing about which half broke.
+
+### C43 — Let the database own correctness
+Four places where the database is a better authority than application code:
+
+- **`server_default=func.now()`, not `default=datetime.now`** — Python's version means three app servers with drifting clocks write inconsistent orderings, and it doesn't apply to inserts that bypass the ORM. One clock, always applied.
+- **`DateTime(timezone=True)`** — a naive timestamp is a bug with a delayed fuse. Local Postgres runs `Asia/Kolkata`; a v0.4 deployment runs UTC.
+- **`ondelete="CASCADE"`** — the DB removes orphans. Application code can be bypassed; a constraint cannot.
+- **The foreign key surfaced a bug the dict had hidden:** `setdefault` created conversations implicitly, so `add_message` never had to think about it. Postgres refuses. **Constraints make impossible states impossible.**
+
+### C44 — An index is a data structure chosen for an access pattern
+Every read is *"messages for this conversation, chronological, limited"*, so: `Index("ix_messages_conversation_created", "conversation_id", "created_at")`.
+
+Without it Postgres scans every message in every conversation. At 50 messages, invisible; at 500,000, seconds per request. **Same reasoning as picking a hash map over a list** — this is where DSA stops being an exercise.
+
+It only pays off because of the interface: `ORDER BY ... LIMIT 10` on an indexed column reads ~10 rows, while "load all, slice in Python" reads everything. Design the access pattern first; the index serves it.
+
+### C45 — Check-then-act is a race; make it atomic
+```python
+conversation = session.get(Conversation, cid)   # read
+if conversation is None:
+    session.add(Conversation(id=cid))           # write
+```
+Two concurrent requests opening the same conversation both see `None`; the second `INSERT` raises a duplicate-key error. Invisible with one user, **guaranteed in v0.4** with multiple workers — surfacing as an unreproducible 500.
+
+The fix is never "check more carefully", it's **one statement**: `INSERT ... ON CONFLICT DO NOTHING`. **Let the database arbitrate concurrency — it's built for it; your application code isn't.**
+
+### C46 — One Engine per process
+A SQLAlchemy `Engine` owns a **connection pool**. Create one per request and you open a fresh pool every time, never reuse a connection, and exhaust Postgres's 100-connection default under trivial load. `lru_cache` it.
+
+`pool_pre_ping=True` sends a cheap `SELECT 1` before lending a pooled connection — the difference between surviving a database restart and needing your own.
+
+### C47 — Migrations are code; autogenerate is a draft
+`create_all()` can create tables, never alter them. Alembic makes the schema **versioned, diffable, reviewable in a PR, and reversible** — the database equivalent of `uv.lock`.
+
+Autogenerate reliably detects new tables and columns. It is unreliable about **renames — it emits drop + add, which destroys data** — and about server defaults, constraint changes and custom types like `vector`.
+
+> **A migration you haven't read is a production incident you've scheduled.**
+
+Reversibility was *proven*, not assumed: `downgrade -1` removed the tables, `upgrade head` brought them back. In v0.4 that's the 2am rollback path.
+
+### C48 — Ordering needs a *total* order
+In Postgres `now()` returns the **transaction start time** — rows written in one transaction share a timestamp and `ORDER BY created_at` cannot separate them. Conversations come back scrambled. `ORDER BY created_at, id` breaks ties deterministically.
+
+Related subtlety: to fetch the *last* N you must query `DESC ... LIMIT n` (so the index does the work), then reverse in Python — the model needs chronological order.
+
+### C49 — Dead code keeps its dependencies alive and hides them from the linter
+After swapping to Postgres, `routes/chat.py` kept `repository = InMemoryConversationRepository()` — never read, but executed on every import. Ruff did **not** report the import as unused, *because the dead line used it.* One piece of dead code concealed another.
+
 ---
 
 ## 📊 REFERENCE — LLM API pricing (2026-08-02)
@@ -528,3 +590,4 @@ Plus a module-name collision caught by mypy → C35 / D15.
 | 2026-09-22 | **Block 6 COMPLETE** — GitHub Actions CI (format/lint/types, no API key), README; concepts C36–C37 |
 | 2026-09-22 | **🎉 v0.1 SHIPPED** — 6/6 blocks, CI green, tagged `v0.1` |
 | 2026-09-26 | **v0.2 Block 1 COMPLETE** — pytest configured, 5 tests on `ChatService` running with no key; `get_history` returns a copy; `self._client` made private; `tests/__init__.py` added; pytest wired into CI. Concepts C38–C41, decision D16 |
+| 2026-10-03 | **v0.2 Block 2 COMPLETE** — PostgreSQL 17 + pgvector, SQLAlchemy models, Alembic migration (reversibility verified), `PostgresConversationRepository` with atomic upsert, repository Protocol, `app/domain.py`. Cross-process persistence proven. Concepts C42–C49, decisions D17–D19 |

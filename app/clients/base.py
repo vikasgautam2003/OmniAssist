@@ -1,7 +1,7 @@
 from collections.abc import Iterator
 from typing import Protocol
 
-Message = dict[str, str]
+from app.domain import Message
 
 
 class LLMError(Exception):

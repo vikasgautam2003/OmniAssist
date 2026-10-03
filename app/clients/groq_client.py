@@ -3,7 +3,8 @@ from typing import Any, cast
 
 from groq import Groq
 
-from app.clients.base import LLMError, Message
+from app.clients.base import LLMError
+from app.domain import Message
 
 
 class GroqClient:
