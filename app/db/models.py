@@ -55,7 +55,7 @@ class MessageRow(Base):
     )
 
 
-class User(Base):
+class UserRow(Base):
     __tablename__ = "users"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)

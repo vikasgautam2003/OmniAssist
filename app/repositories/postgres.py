@@ -1,9 +1,11 @@
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import IntegrityError
 
-from app.db.models import Conversation, MessageRow
+from app.db.models import Conversation, MessageRow, UserRow
 from app.db.session import get_session_factory
-from app.domain import Message
+from app.domain import Message, User
+from app.repositories.base import EmailAlreadyExistsError
 
 
 class PostgresConversationRepository:
@@ -61,3 +63,34 @@ class PostgresConversationRepository:
             )
 
             session.commit()
+
+
+class PostgresUserRepository:
+    def __init__(self) -> None:
+        self._session_factory = get_session_factory()
+
+    def get_by_email(self, email: str) -> User | None:
+        with self._session_factory() as session:
+            row = session.scalars(
+                select(UserRow).where(UserRow.email == email)
+            ).one_or_none()
+
+            if row is None:
+                return None
+
+            return User(id=row.id, email=row.email, password_hash=row.password_hash)
+
+    def create(self, email: str, password_hash: str) -> User:
+        with self._session_factory() as session:
+            row = UserRow(email=email, password_hash=password_hash)
+            session.add(row)
+
+            try:
+                session.commit()
+            except IntegrityError as exc:
+                # The unique constraint is the real guarantee; translate the
+                # driver's exception so callers never import sqlalchemy.
+                session.rollback()
+                raise EmailAlreadyExistsError(email) from exc
+
+            return User(id=row.id, email=row.email, password_hash=row.password_hash)
