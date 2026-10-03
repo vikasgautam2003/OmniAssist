@@ -11,6 +11,8 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
     )
 
+    database_url: str
+
     llm_api_key: SecretStr
 
     llm_provider: Literal["groq", "anthropic"] = "groq"
