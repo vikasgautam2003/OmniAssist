@@ -23,6 +23,7 @@
 | **D10** | **v0.1 runs on Groq free tier — `llama-3.3-70b-versatile`** | Budget is $0. Groq = ~1,000 req/day, 30 RPM, **no credit card, ongoing**; Anthropic has no free tier. v0.1 needs ~200 requests total. ⚠️ **Groq ≠ Grok** — Groq is an inference provider serving open-weight models (free); Grok is xAI's model ($25 credits then paid). Config is provider-neutral: `LLM_PROVIDER` / `LLM_API_KEY` / `LLM_MODEL`. | Yes — that's the point of D8 |
 | **D11** | **Conversation history must be trimmed** (Block 4), not left unbounded | Groq's free tier caps ~**14,400 tokens/minute**. Per C10, a 40-turn conversation is ~40K tokens in *one* request — over the entire per-minute budget. **A limit that makes you build it right beats unlimited quota that lets you build it wrong.** | No |
 | **D13** | **Model switched to `openai/gpt-oss-120b`** on Groq | Changed by editing **one line of `.env`** — zero code changes. Live proof that D3 + D8 work. | Yes — one line |
+| **D26** | **Ownership is enforced in the repository's `WHERE` clause**, not checked in the service | Both work today. The difference is the next code path — an admin view, a background job, an export endpoint — where a service-level check can be forgotten. A filter inside the query cannot be, because there is no query without it. **Make the secure path the only path.** | No |
 | **D25** | **Minimum password length 12, no composition rules** | Current NIST guidance: length is what matters. Forcing uppercase/digit/symbol produces `Password1!` and a sticky note — it reduces entropy by making passwords predictable while feeling stricter. | Yes |
 | **D24** | **React/Next.js stays at v0.4**, Streamlit until then | Streamlit already proves the backend end to end, and the API is UI-agnostic (SSE + JSON), so swapping clients is replacing one consumer rather than rewriting anything. Building login screens now against an auth model that multi-tenancy will change in v0.4 means building them twice. | Yes |
 | **D23** | **Email normalised (lowercased + stripped) at the Pydantic boundary**, once | Domains are case-insensitive and no real provider treats local parts as distinct, so `Vikas@x.com` and `vikas@x.com` must be one account. Normalising in each route handler means two copies that drift — and the classic bug is signup lowercasing while login doesn't, creating an account the user can never reach. Every entry point goes through a request schema, so the schema is the one place. | No |
@@ -532,6 +533,37 @@ Related: the dummy hash is computed **lazily** (`lru_cache`), not at module scop
 
 Compare the alternative — returning a dict and trusting every current and future handler to omit the sensitive fields. **Make the leak structurally impossible rather than relying on everyone remembering.** Same instinct as `SecretStr` (C14) and `frozen=True` (C39).
 
+### C59 — A lazy security check is no security check
+`stream_reply` was a generator, so the route's `try/except ConversationNotFoundError` wrapped a call that executed **nothing**. The ownership check only ran when FastAPI began streaming — by which point the status line and headers were already sent, and a 404 was physically impossible. The request crashed mid-stream instead of being rejected.
+
+This is **C27 reappearing in a security-critical path.** In v0.1 the cost was a missing test assertion; here it was an authorisation check that could not reject.
+
+The fix is the same eager/lazy split: `stream_reply` is a plain function that performs the check and *returns* a generator from a private `_stream()`.
+
+**What did not catch it:** mypy clean, ruff clean, all five tests passing. Only exercising the real cross-user path did. Hence `test_ownership_is_checked_before_the_stream_is_consumed`, which calls `stream_reply` **without iterating it** — a regression test for laziness itself.
+
+### C60 — 404, not 403, for resources that aren't yours
+403 means *"this exists and it isn't yours"* — which confirms the id is real and lets an attacker enumerate. 404 reveals only what the caller is entitled to know.
+
+Both repositories implement this uniformly: reading another user's conversation returns `[]`, writing to it raises `ConversationNotFoundError`. Same family as C57's identical login errors — **never confirm the existence of something the caller has no right to see.**
+
+### C61 — Adding a NOT NULL column to a populated table
+Autogenerate emitted `op.add_column(..., nullable=False)` against a table holding 4 rows, and Postgres refused: *"column user_id contains null values."* **Structurally correct, operationally impossible** — autogenerate diffs models, and knows nothing about data (C55).
+
+In production this is **three deploys**, not one:
+1. `ADD COLUMN … NULL` — old code keeps inserting fine
+2. backfill
+3. `SET NOT NULL`
+
+The reason is rolling deploys: old and new code run simultaneously, and old code's inserts know nothing about the new column. Doing it in one step here was acceptable only because the rows were disposable local data — the same window as C56.
+
+**Bonus observation: the failure left no damage.** Postgres has transactional DDL, so the migration rolled back atomically. MySQL would have left the column half-added and the revision unrecorded.
+
+### C62 — The upsert ownership trap
+`INSERT … ON CONFLICT DO NOTHING` on the parent conversation looked safe. Add an owner column and it silently isn't: **User B posts to User A's conversation id, the conflict fires, `DO NOTHING` runs, and the message is inserted into A's conversation.** A cross-user *write*, which is worse than a read leak.
+
+The upsert must be followed by an ownership check in the same transaction. **When you add a column that carries authority, re-audit every statement that touches the row** — "do nothing on conflict" means "do nothing about the conflict", not "this is fine".
+
 ---
 
 ## 📊 REFERENCE — LLM API pricing (2026-08-02)
@@ -672,3 +704,4 @@ Plus a module-name collision caught by mypy → C35 / D15.
 | 2026-10-03 | **v0.2 Block 2 COMPLETE** — PostgreSQL 17 + pgvector, SQLAlchemy models, Alembic migration (reversibility verified), `PostgresConversationRepository` with atomic upsert, repository Protocol, `app/domain.py`. Cross-process persistence proven. Concepts C42–C49, decisions D17–D19 |
 | 2026-10-04 | **v0.2 Block 3 (auth) in progress** — argon2id password hashing, `users` table (UUID PK, unique email), JWT mint/verify with pinned algorithm, `User` domain type + `UserRepository` with `EmailAlreadyExistsError`. Concepts C50–C56, decisions D20–D23 |
 | 2026-10-04 | **Step 3.3c** — `POST /auth/signup` (201/409) and `/auth/login` (200/401) with email normalised once at the Pydantic boundary, identical errors for unknown-vs-wrong, and a constant-time failure path verified by measurement (53 ms vs 56 ms). Concepts C57–C58, decisions D24–D25 |
+| 2026-10-04 | **Steps 3.4–3.5** — `get_current_user` dependency (401 for every failure, user looked up not trusted), `conversations.user_id` FK + migration, ownership enforced in the `WHERE` clause, `/chat` now requires auth and returns 404 for another user's conversation. 8 tests including cross-user isolation. Concepts C59–C62, decision D26 |

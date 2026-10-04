@@ -4,7 +4,13 @@ from fastapi import APIRouter, HTTPException, status
 
 from app.repositories.base import EmailAlreadyExistsError, UserRepository
 from app.repositories.postgres import PostgresUserRepository
-from app.schemas.auth import LoginRequest, SignupRequest, TokenResponse
+from app.routes.deps import CurrentUser
+from app.schemas.auth import (
+    LoginRequest,
+    MeResponse,
+    SignupRequest,
+    TokenResponse,
+)
 from app.security.password import hash_password, verify_password
 from app.security.tokens import create_access_token
 
@@ -63,3 +69,9 @@ def login(credentials: LoginRequest) -> TokenResponse:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, _CREDENTIALS_ERROR)
 
     return TokenResponse(access_token=create_access_token(str(user.id)))
+
+
+@router.get("/me", response_model=MeResponse)
+def me(user: CurrentUser) -> MeResponse:
+    """Who the caller is. The response model omits password_hash by construction."""
+    return MeResponse(id=user.id, email=user.email)
