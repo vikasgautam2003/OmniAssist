@@ -564,6 +564,27 @@ The reason is rolling deploys: old and new code run simultaneously, and old code
 
 The upsert must be followed by an ownership check in the same transaction. **When you add a column that carries authority, re-audit every statement that touches the row** — "do nothing on conflict" means "do nothing about the conflict", not "this is fine".
 
+### C63 — Auth in a re-run model: the gate and `st.stop()`
+Streamlit has no routing. The script runs top to bottom on **every** interaction, so *"am I signed in?"* cannot be remembered — it must be re-derived each run:
+
+```python
+if "token" not in st.session_state:
+    render_auth()
+    st.stop()        # halt here; nothing below runs
+render_chat()
+```
+
+**Without `st.stop()` the chat UI renders underneath the login form.** `st.stop()` is how you write a guard clause when there are no routes to redirect to.
+
+`st.form` matters for the same reason: a bare `text_input` re-runs the script on **every keystroke**. A form batches the inputs and submits once.
+
+### C64 — Store the token, never the password
+The password goes into a form field, is posted once, and is never written to `session_state`. **You cannot leak what you do not keep.** The token is stored because every subsequent request needs it.
+
+**And handle expiry as a normal path, not an error.** Tokens live 60 minutes; a tab left open will 401 on its next message. The client drops the token and re-renders the login screen rather than showing a traceback — the user sees a login form, which is the truth.
+
+This is the full **auth flow**, not just an auth check: credentials → token → stored → attached to every request → expired → back to login. The same five stages appear in React in v0.4; only the syntax differs.
+
 ---
 
 ## 📊 REFERENCE — LLM API pricing (2026-08-02)
@@ -705,3 +726,4 @@ Plus a module-name collision caught by mypy → C35 / D15.
 | 2026-10-04 | **v0.2 Block 3 (auth) in progress** — argon2id password hashing, `users` table (UUID PK, unique email), JWT mint/verify with pinned algorithm, `User` domain type + `UserRepository` with `EmailAlreadyExistsError`. Concepts C50–C56, decisions D20–D23 |
 | 2026-10-04 | **Step 3.3c** — `POST /auth/signup` (201/409) and `/auth/login` (200/401) with email normalised once at the Pydantic boundary, identical errors for unknown-vs-wrong, and a constant-time failure path verified by measurement (53 ms vs 56 ms). Concepts C57–C58, decisions D24–D25 |
 | 2026-10-04 | **Steps 3.4–3.5** — `get_current_user` dependency (401 for every failure, user looked up not trusted), `conversations.user_id` FK + migration, ownership enforced in the `WHERE` clause, `/chat` now requires auth and returns 404 for another user's conversation. 8 tests including cross-user isolation. Concepts C59–C62, decision D26 |
+| 2026-10-04 | **Step 3.6 — Block 3 COMPLETE.** Streamlit auth gate: login/signup tabs, token in `session_state`, `Authorization: Bearer` on chat, 401-on-expiry returns to login, logout and new-conversation controls. API contract verified for all six status codes the UI branches on. Concepts C63–C64 |

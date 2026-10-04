@@ -322,7 +322,7 @@ Then send a message in one Python process and read it back in **another** — th
 
 ---
 
-## 🔄 v0.2 · BLOCK 3 — Authentication *(in progress)*
+## ✅ v0.2 · BLOCK 3 — Authentication
 
 **Goal:** conversations belong to someone. Until they do, anyone who guesses an ID reads another user's history.
 
@@ -348,7 +348,32 @@ uv add argon2-cffi pyjwt email-validator
 - A JWT is **signed, not encrypted** — the payload is readable without the key. Pin `algorithms=["HS256"]`; never let the token choose.
 - `EmailAlreadyExistsError` is raised by **both** repositories (Postgres translates `IntegrityError`), so no caller imports sqlalchemy and the fake stays behaviourally identical
 
-**Remaining:** 3.3c auth routes · 3.4 `get_current_user` dependency · 3.5 conversation ownership · 3.6 tests + Streamlit login
+**Steps 3.3c–3.6**
+
+| File | Purpose |
+|---|---|
+| `app/schemas/auth.py` | request/response models; email normalised **once**, shared by signup and login |
+| `app/routes/auth.py` | `POST /auth/signup` (201/409), `POST /auth/login` (200/401), `GET /auth/me` |
+| `app/routes/deps.py` | `get_current_user` + the `CurrentUser` alias |
+| `migrations/…add_user_id…` | `conversations.user_id` FK (deletes orphan rows first) |
+| `ui/streamlit_app.py` | auth gate, token in `session_state`, 401 → re-login |
+
+**Key points**
+- Login returns an identical 401 for unknown-email and wrong-password, **and** verifies against a throwaway hash when the user is missing — otherwise the ~2 ms vs ~53 ms difference reveals which emails exist
+- `HTTPBearer(auto_error=False)`: FastAPI's default 403 is the wrong code for a missing header
+- The user is **looked up**, not trusted from the token — a JWT cannot be revoked before it expires
+- Ownership lives in the repository's `WHERE` clause, never a check beside the query
+- Another user's conversation returns **404**, never 403
+- The `ON CONFLICT DO NOTHING` upsert became unsafe once the row had an owner — it now verifies ownership in the same transaction
+- 🔴 `stream_reply` is **not** a generator: it was, so the route's `except` wrapped a call that ran nothing and the ownership check fired mid-stream, too late for a 404
+
+**Verify**
+```bash
+uv run pytest                                  # 8 tests, no DB, no key
+uv run uvicorn app.main:app --reload --port 8000
+uv run streamlit run ui/streamlit_app.py
+```
+Sign up in one browser, sign up in a private window, and confirm neither can see the other's conversation.
 
 ---
 
