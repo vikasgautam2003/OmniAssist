@@ -1,3 +1,4 @@
+import uuid
 from collections.abc import Callable
 
 import pytest
@@ -7,6 +8,16 @@ from app.services.chat import ChatService
 from tests.fakes import FakeLLMClient
 
 ServiceFactory = Callable[..., tuple[ChatService, FakeLLMClient]]
+
+
+@pytest.fixture
+def user_id() -> uuid.UUID:
+    return uuid.uuid4()
+
+
+@pytest.fixture
+def other_user_id() -> uuid.UUID:
+    return uuid.uuid4()
 
 
 @pytest.fixture
