@@ -22,13 +22,11 @@ class Settings(BaseSettings):
     llm_model: str = "llama-3.3-70b-versatile"
     max_tokens: int = 4096
 
-    # Tuning knobs for the retrieval pipeline, not constants. 1000 characters
-    # is roughly 250 tokens -- well inside the 512-token limit of the local
-    # embedding model -- and small enough that a retrieved chunk is a focused
-    # passage rather than a page. 150 is about 15% overlap, enough to carry a
-    # sentence across a boundary.
+  
     chunk_size: int = 1000
     chunk_overlap: int = 150
+
+    embedding_provider: Literal["local", "gemini"] = "local"
 
     app_env: Literal["local", "staging", "production"] = "local"
 

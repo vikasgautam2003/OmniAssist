@@ -1,4 +1,3 @@
-
 BOUNDARIES = ("\n\n", "\n", ". ", " ")
 
 
@@ -12,7 +11,6 @@ def _cut_at(text: str, start: int, end: int) -> int:
     for marker in BOUNDARIES:
         found = text.rfind(marker, floor, end)
         if found != -1:
-
             return found + len(marker)
 
     return end
@@ -44,12 +42,10 @@ def chunk_text(text: str, *, size: int, overlap: int) -> list[str]:
 
         piece = text[start:end].strip()
         if piece:
-
             chunks.append(piece)
 
         if end >= length:
             break
-
 
         start = max(end - overlap, start + 1)
 
