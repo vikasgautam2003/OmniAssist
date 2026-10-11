@@ -5,6 +5,7 @@ import pytest
 
 from app.repositories.memory import InMemoryConversationRepository
 from app.services.chat import ChatService
+from app.services.retrieval import Retriever
 from tests.fakes import FakeLLMClient
 
 ServiceFactory = Callable[..., tuple[ChatService, FakeLLMClient]]
@@ -29,10 +30,14 @@ def make_service() -> ServiceFactory:
     """
 
     def _make(
-        reply: str = "reply", max_history: int = 10
+        reply: str = "reply",
+        max_history: int = 10,
+        retriever: Retriever | None = None,
     ) -> tuple[ChatService, FakeLLMClient]:
         fake = FakeLLMClient(reply)
-        service = ChatService(fake, InMemoryConversationRepository(), max_history)
+        service = ChatService(
+            fake, InMemoryConversationRepository(), max_history, retriever=retriever
+        )
         return service, fake
 
     return _make

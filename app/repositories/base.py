@@ -1,7 +1,7 @@
 import uuid
 from typing import Protocol
 
-from app.domain import Message, User
+from app.domain import Chunk, Message, User, Vector
 
 
 class EmailAlreadyExistsError(Exception):
@@ -38,3 +38,16 @@ class UserRepository(Protocol):
 
     def get_by_email(self, email: str) -> User | None: ...
     def create(self, email: str, password_hash: str) -> User: ...
+
+
+class ChunkRepository(Protocol):
+    def add(
+        self,
+        user_id: uuid.UUID,
+        document_name: str,
+        chunks: list[str],
+        vectors: list[Vector],
+        model_id: str,
+    ) -> None: ...
+
+    def search(self, user_id: uuid.UUID, vector: Vector, limit: int) -> list[Chunk]: ...

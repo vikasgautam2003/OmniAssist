@@ -4,9 +4,9 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 
-from app.db.models import Conversation, MessageRow, UserRow
+from app.db.models import Conversation, DocumentChunk, MessageRow, UserRow
 from app.db.session import get_session_factory
-from app.domain import Message, User
+from app.domain import Chunk, Message, User, Vector
 from app.repositories.base import ConversationNotFoundError, EmailAlreadyExistsError
 
 
@@ -129,3 +129,62 @@ class PostgresUserRepository:
                 raise EmailAlreadyExistsError(email) from exc
 
             return User(id=row.id, email=row.email, password_hash=row.password_hash)
+
+
+class PostgresChunkRepository:
+    def __init__(self) -> None:
+        self._session_factory = get_session_factory()
+
+    def add(
+        self,
+        user_id: uuid.UUID,
+        document_name: str,
+        chunks: list[str],
+        vectors: list[Vector],
+        model_id: str,
+    ) -> None:
+        if len(chunks) != len(vectors):
+            raise ValueError(
+                f"Got {len(chunks)} chunks and {len(vectors)} vectors; "
+                "they must correspond one to one."
+            )
+
+        rows = [
+            DocumentChunk(
+                user_id=user_id,
+                document_name=document_name,
+                chunk_index=index,
+                content=content,
+                embedding=vector,
+                model_id=model_id,
+            )
+            for index, (content, vector) in enumerate(zip(chunks, vectors, strict=True))
+        ]
+
+        with self._session_factory() as session:
+            session.add_all(rows)
+            session.commit()
+
+    def search(self, user_id: uuid.UUID, vector: Vector, limit: int) -> list[Chunk]:
+        # user_id is a filter inside the query, never a check beside it:
+        # retrieval that is not scoped answers one user from another's
+        # documents. Cosine distance matches what the embedding model was
+        # trained for; a different operator would quietly rank worse.
+        query = (
+            select(DocumentChunk)
+            .where(DocumentChunk.user_id == user_id)
+            .order_by(DocumentChunk.embedding.cosine_distance(vector))
+            .limit(limit)
+        )
+
+        with self._session_factory() as session:
+            rows = session.scalars(query).all()
+
+        return [
+            Chunk(
+                content=row.content,
+                document_name=row.document_name,
+                chunk_index=row.chunk_index,
+            )
+            for row in rows
+        ]
