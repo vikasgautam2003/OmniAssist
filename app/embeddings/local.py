@@ -1,9 +1,9 @@
 from fastembed import TextEmbedding
 
-from app.domain import Vector
-from app.embeddings.base import EMBEDDING_DIMENSIONS, EmbeddingError
+from app.embeddings.base import EmbeddingError, Vector
 
 MODEL_ID = "BAAI/bge-small-en-v1.5"
+DIMENSIONS = 384
 QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
 
 
@@ -24,7 +24,7 @@ class LocalEmbedder:
 
     @property
     def dimensions(self) -> int:
-        return EMBEDDING_DIMENSIONS
+        return DIMENSIONS
 
     def embed_documents(self, texts: list[str]) -> list[Vector]:
         if not texts:
