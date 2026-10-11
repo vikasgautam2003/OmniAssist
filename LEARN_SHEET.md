@@ -23,6 +23,7 @@
 | **D10** | **v0.1 runs on Groq free tier — `llama-3.3-70b-versatile`** | Budget is $0. Groq = ~1,000 req/day, 30 RPM, **no credit card, ongoing**; Anthropic has no free tier. v0.1 needs ~200 requests total. ⚠️ **Groq ≠ Grok** — Groq is an inference provider serving open-weight models (free); Grok is xAI's model ($25 credits then paid). Config is provider-neutral: `LLM_PROVIDER` / `LLM_API_KEY` / `LLM_MODEL`. | Yes — that's the point of D8 |
 | **D11** | **Conversation history must be trimmed** (Block 4), not left unbounded | Groq's free tier caps ~**14,400 tokens/minute**. Per C10, a 40-turn conversation is ~40K tokens in *one* request — over the entire per-minute budget. **A limit that makes you build it right beats unlimited quota that lets you build it wrong.** | No |
 | **D13** | **Model switched to `openai/gpt-oss-120b`** on Groq | Changed by editing **one line of `.env`** — zero code changes. Live proof that D3 + D8 work. | Yes — one line |
+| **D37** | **Verify UI work by driving a real browser, not by reading the code** | Streamlit's own headless test harness reported no exception and every control present, yet the rendered page had three defects it could not see: an icon font overridden into literal text, an uploader whose only entry point was hidden, and an avatar value that crashed every assistant reply. Chrome over the DevTools Protocol was already on the machine and needed no install. | n/a — practice |
 | **D36** | **Indexing runs inside the request, with a 10 MB upload cap** | Embedding a few hundred passages blocks a worker for seconds. The correct answer is a background queue, which is v0.3's Celery work. Accepted knowingly: the size cap bounds the worst case, and the limitation is scheduled rather than unnoticed. | Yes — v0.3 moves it to a queue |
 | **D35** | **Re-uploading a document replaces its passages rather than appending** | Appending stores every passage twice, so retrieval spends half its context budget repeating itself and the model sounds more confident for having seen the same text twice. Replace is also what a user means by "upload it again". | Yes |
 | **D34** | **Full roadmap retained — v0.3, v0.4 and v1.0 all built, no scope cut** | Measured pace is ~1.3 working days/week (8 active days across 42), which puts the full roadmap around April–June 2027 rather than December. Trimming the shallow generators (video, image, CSV export) and deferring React would have cost ~10 working days instead of ~24. Decision taken knowingly: the complete system is the goal, and the timeline moves instead of the scope. | Yes — revisit if December matters |
@@ -857,6 +858,41 @@ is meaningful.
 The distinction worth keeping: **an error the caller can act on should say what
 to do; an error that is our fault should say nothing about our internals.**
 
+### C87 — "No exception" is not "renders correctly"
+`streamlit.testing.v1.AppTest` ran both screens, reported **no exception**, and
+listed every tab, input and button. Three defects were invisible to it:
+
+1. A `[class*="st-"]` font rule also matched Streamlit's **icon spans**, whose
+   glyphs are font ligatures — so the password-reveal icon rendered as the
+   literal text `visibili`
+2. Hiding the file uploader's browse button left **drag-and-drop as the only
+   way to upload**, and the dropzone advertised Streamlit's default 200 MB
+   rather than the real 10 MB limit
+3. `st.chat_message(avatar="◆")` — a dingbat is not an emoji, so Streamlit
+   treated it as a **file path** and raised `StreamlitAPIException` on *every*
+   assistant reply
+
+The third would have broken the feature completely for the first real user.
+None was findable by reading the code or by a structural test. The fix was to
+drive headless Chrome over the DevTools Protocol and **look at the pixels**.
+
+Worth noting what made this cheap: Chrome was already installed, and
+`websockets` was already a dependency. A one-shot `--screenshot` is not enough,
+because `--virtual-time-budget` fast-forwards timers but never completes a
+WebSocket handshake — so it only ever captures Streamlit's loading skeleton.
+Navigating over CDP and sleeping in *real* time is what works.
+
+### C88 — Styling by attribute selector is borrowing, not owning
+Streamlit exposes no theming API beyond a handful of colours, so anything
+further means CSS aimed at its `data-testid` attributes and emotion class
+names. Those are **implementation details**, not a contract: a Streamlit
+upgrade can rename them and the styling silently degrades.
+
+Two habits make that survivable. Target `data-testid` rather than generated
+class names, since testids change far less often. And keep the selectors narrow
+— the broad `[class*="st-"]` rule is precisely what broke the icons, because it
+matched elements it was never meant to.
+
 ---
 
 ## 📊 REFERENCE — LLM API pricing (2026-08-02)
@@ -1005,3 +1041,4 @@ Plus a module-name collision caught by mypy → C35 / D15.
 | 2026-10-11 | **Step 4.5** — retrieval wired into chat. `Retriever` turns a question into passages; `ChatService` takes an optional retriever and prepends a grounded system message carrying the passages and their document names. The raw question is what reaches history. 11 new tests including the stale-context regression. Concepts C76–C79, decisions D31–D32 |
 | 2026-10-11 | **🔴 Incident — `main` broken by an automatic branch update.** GitHub's "Update branch" resolved five files in `main`'s favour, discarding Step 4.4 changes; PR #15 squashed that merge commit rather than the pushed work, and `main` stopped importing. CI had reported `failure` on `main` for two consecutive merges unnoticed. Fix verified in a scratch checkout before being proposed. Concepts C80–C82, decision D33 |
 | 2026-10-11 | **Step 4.6 — Block 4 COMPLETE.** Upload path: `Indexer` composes extraction, chunking and embedding; `POST /documents` with a 10 MB cap and error-specific status codes; `GET /documents`; Streamlit sidebar uploader and document list. Re-upload replaces rather than appends, and extraction runs before the delete so a failed re-upload cannot destroy a good version. 7 new tests, 54 total, verified end to end against PostgreSQL. Concepts C83–C86, decisions D35–D36 |
+| 2026-10-11 | **UI redesign** — dark theme in `.streamlit/config.toml`, `ui/styles.py` holding the CSS, restructured auth and chat screens with a branded header, document cards, a grounded/ungrounded status pill, an empty state and suggestion chips. Verified by screenshotting a real browser over CDP, which found three defects a structural test reported as passing. Concepts C87–C88, decision D37 |

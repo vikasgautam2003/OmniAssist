@@ -376,6 +376,27 @@ by anyone holding it, so nothing secret goes inside.
 
 ## User interface
 
+### `ui/styles.py`
+**Is** — the interface's CSS, plus a `brand()` helper, as a single string.
+
+**Why** — Streamlit's theming API covers only a few colours, so everything past
+that is CSS aimed at its `data-testid` attributes. Keeping it here leaves the
+app module about behaviour. Those attributes are implementation details rather
+than a contract, so the selectors are deliberately narrow: an early blanket
+`[class*="st-"]` font rule also matched Streamlit's icon spans and rendered the
+password-reveal glyph as the literal text "visibili".
+
+**Fits** — imported by `streamlit_app.py` and injected once per run. Paired with
+`.streamlit/config.toml`, which sets the theme tokens Streamlit applies to its
+own chrome before any of this CSS runs.
+
+### `.streamlit/config.toml`
+**Is** — theme colours, minimal toolbar, and `maxUploadSize`.
+
+**Why** — the tokens here style what Streamlit draws itself, which CSS cannot
+reach. `maxUploadSize = 10` matches `max_upload_bytes` in `app/config.py`, so
+the dropzone advertises the real limit instead of the 200 MB default.
+
 ### `ui/streamlit_app.py`
 **Is** — the web interface: login and signup tabs, chat with streaming output,
 a sidebar PDF uploader with the list of indexed documents, and logout.
@@ -516,5 +537,5 @@ This document.
 
 ---
 
-*Updated through Step 4.6 — Block 4 complete. Revise when
+*Updated through Step 4.6 and the UI redesign. Revise when
 files are added, removed, or change purpose.*
