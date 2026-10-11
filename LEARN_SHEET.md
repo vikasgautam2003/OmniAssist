@@ -23,6 +23,9 @@
 | **D10** | **v0.1 runs on Groq free tier — `llama-3.3-70b-versatile`** | Budget is $0. Groq = ~1,000 req/day, 30 RPM, **no credit card, ongoing**; Anthropic has no free tier. v0.1 needs ~200 requests total. ⚠️ **Groq ≠ Grok** — Groq is an inference provider serving open-weight models (free); Grok is xAI's model ($25 credits then paid). Config is provider-neutral: `LLM_PROVIDER` / `LLM_API_KEY` / `LLM_MODEL`. | Yes — that's the point of D8 |
 | **D11** | **Conversation history must be trimmed** (Block 4), not left unbounded | Groq's free tier caps ~**14,400 tokens/minute**. Per C10, a 40-turn conversation is ~40K tokens in *one* request — over the entire per-minute budget. **A limit that makes you build it right beats unlimited quota that lets you build it wrong.** | No |
 | **D13** | **Model switched to `openai/gpt-oss-120b`** on Groq | Changed by editing **one line of `.env`** — zero code changes. Live proof that D3 + D8 work. | Yes — one line |
+| **D36** | **Indexing runs inside the request, with a 10 MB upload cap** | Embedding a few hundred passages blocks a worker for seconds. The correct answer is a background queue, which is v0.3's Celery work. Accepted knowingly: the size cap bounds the worst case, and the limitation is scheduled rather than unnoticed. | Yes — v0.3 moves it to a queue |
+| **D35** | **Re-uploading a document replaces its passages rather than appending** | Appending stores every passage twice, so retrieval spends half its context budget repeating itself and the model sounds more confident for having seen the same text twice. Replace is also what a user means by "upload it again". | Yes |
+| **D34** | **Full roadmap retained — v0.3, v0.4 and v1.0 all built, no scope cut** | Measured pace is ~1.3 working days/week (8 active days across 42), which puts the full roadmap around April–June 2027 rather than December. Trimming the shallow generators (video, image, CSV export) and deferring React would have cost ~10 working days instead of ~24. Decision taken knowingly: the complete system is the goal, and the timeline moves instead of the scope. | Yes — revisit if December matters |
 | **D33** | **Update a branch by pulling locally (`git pull --rebase`), never with GitHub's "Update branch" button** | The button merges server-side and, when it cannot merge cleanly, picks a side instead of stopping. It discarded five files' worth of work and the pull request then squashed *that* commit, leaving `main` unable to import. A local pull puts the conflict in front of you. | Yes — but the cost of getting it wrong is a broken `main` |
 | **D32** | **Prompt injection is a known, unmitigated hole** — recorded rather than silently ignored | Retrieved document text is placed in the prompt, so a PDF containing *"ignore your instructions"* is an injection vector. Defending it properly needs input/output filtering and privilege separation, which is v1.0 work. Writing the limitation down beats discovering it in an interview. | n/a — tracked |
 | **D31** | **Context is injected as a system message; the raw question is what gets stored** | The alternative, storing the augmented prompt, grows history by thousands of characters per turn, re-sends context retrieved for an older question, and hides what the user actually asked. Context is an input to one model call, not a fact about the conversation. | Yes |
@@ -807,6 +810,53 @@ Cheap, and it converts "this should work" into "this does work". The same
 instinct as the chunking conservation test: assert the property, do not assume
 it.
 
+### C83 — Do all the work that can fail *before* the work that destroys
+`Indexer.index` extracts and embeds first, then deletes the old passages, then
+writes the new ones. Reverse the order and a failed re-upload leaves the user
+with **nothing**: the previous good version deleted, the new one never written.
+
+There is a test for exactly that — re-index with a corrupt file and assert the
+earlier document is still listed. The general rule is wider than indexing:
+**order operations so that the destructive step is the last thing that can
+fail**, and anything partial is simply never written.
+
+### C84 — A silent `str.replace` is a silent bug
+A patch that added two methods to `ChunkRepository` matched nothing, because
+the anchor text had already been reformatted onto one line. `str.replace` with
+no match **returns the string unchanged and reports success**, so the edit was
+reported as applied and was not.
+
+mypy caught it — *"ChunkRepository has no attribute delete_document"* — but only
+because the protocol is type-checked. Every scripted edit should assert its
+anchor exists before replacing:
+
+```python
+assert old in text, "anchor not found"
+```
+
+Same family as the chunking data loss: an operation that quietly does nothing
+is more dangerous than one that throws.
+
+### C85 — Upload size must be checked before the read, not after
+`await file.read()` on a 2 GB upload loads 2 GB into memory. FastAPI imposes no
+limit by default, so a single request can exhaust the process — a denial of
+service requiring no skill at all.
+
+The check uses `file.size` where the client supplied it, and re-checks the
+actual length after reading, because a declared size is a client claim and
+clients lie. **413 Payload Too Large** exists precisely for this.
+
+### C86 — Which error messages are safe to show the user
+`PdfExtractionError`'s text was written *for* the user — *"If this is a scanned
+document, it needs OCR first"* — so it passes straight through as a **400**.
+
+`EmbeddingError`'s was not; it may carry backend detail, so the route replaces
+it with a neutral message and returns **503**, which also signals that retrying
+is meaningful.
+
+The distinction worth keeping: **an error the caller can act on should say what
+to do; an error that is our fault should say nothing about our internals.**
+
 ---
 
 ## 📊 REFERENCE — LLM API pricing (2026-08-02)
@@ -954,3 +1004,4 @@ Plus a module-name collision caught by mypy → C35 / D15.
 | 2026-10-11 | **Step 4.3** — `app/embeddings/`: `Embedder` protocol exposing `model_id` and `dimensions`, `LocalEmbedder` on `fastembed`/`bge-small-en-v1.5` (384 dims), `FakeEmbedder` for tests, factory with a lazy inner import verified not to load `onnxruntime`. 6 tests; no model download in CI. Concepts C72–C75, decisions D27–D28 |
 | 2026-10-11 | **Step 4.5** — retrieval wired into chat. `Retriever` turns a question into passages; `ChatService` takes an optional retriever and prepends a grounded system message carrying the passages and their document names. The raw question is what reaches history. 11 new tests including the stale-context regression. Concepts C76–C79, decisions D31–D32 |
 | 2026-10-11 | **🔴 Incident — `main` broken by an automatic branch update.** GitHub's "Update branch" resolved five files in `main`'s favour, discarding Step 4.4 changes; PR #15 squashed that merge commit rather than the pushed work, and `main` stopped importing. CI had reported `failure` on `main` for two consecutive merges unnoticed. Fix verified in a scratch checkout before being proposed. Concepts C80–C82, decision D33 |
+| 2026-10-11 | **Step 4.6 — Block 4 COMPLETE.** Upload path: `Indexer` composes extraction, chunking and embedding; `POST /documents` with a 10 MB cap and error-specific status codes; `GET /documents`; Streamlit sidebar uploader and document list. Re-upload replaces rather than appends, and extraction runs before the delete so a failed re-upload cannot destroy a good version. 7 new tests, 54 total, verified end to end against PostgreSQL. Concepts C83–C86, decisions D35–D36 |

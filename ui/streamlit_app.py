@@ -21,7 +21,7 @@ def start_session(token: str) -> None:
 
 def end_session() -> None:
     """Forget everything about the signed-in user."""
-    for key in ("token", "conversation_id", "messages"):
+    for key in ("token", "conversation_id", "messages", "indexed"):
         st.session_state.pop(key, None)
     st.rerun()
 
@@ -102,6 +102,46 @@ def stream_reply(user_message: str) -> Iterator[str]:
             yield json.loads(payload)
 
 
+def upload_document(name: str, data: bytes) -> None:
+    """Send a PDF to be indexed, and report the outcome in the sidebar."""
+    try:
+        response = httpx.post(
+            f"{API_URL}/documents",
+            headers={"Authorization": f"Bearer {st.session_state.token}"},
+            files={"file": (name, data, "application/pdf")},
+            timeout=180.0,
+        )
+    except httpx.HTTPError:
+        st.sidebar.error("Could not reach the server.")
+        return
+
+    if response.status_code == 401:
+        end_session()
+        return
+
+    if response.status_code >= 400:
+        # 400 carries a message written for the user -- "this needs OCR" --
+        # so showing it is more useful than a generic failure.
+        st.sidebar.error(response.json().get("detail", "Upload failed."))
+        return
+
+    passages = response.json()["passages"]
+    st.sidebar.success(f"Indexed {name} into {passages} passages.")
+
+
+def fetch_documents() -> list[str]:
+    try:
+        response = httpx.get(
+            f"{API_URL}/documents",
+            headers={"Authorization": f"Bearer {st.session_state.token}"},
+            timeout=10.0,
+        )
+    except httpx.HTTPError:
+        return []
+
+    return list(response.json()) if response.status_code == 200 else []
+
+
 def render_chat() -> None:
     with st.sidebar:
         st.markdown("### OmniAssist")
@@ -109,6 +149,26 @@ def render_chat() -> None:
             start_session(st.session_state.token)
         if st.button("Log out", use_container_width=True):
             end_session()
+
+        st.divider()
+        st.markdown("### Documents")
+
+        upload = st.file_uploader("Add a PDF", type="pdf", key="upload")
+
+        # Streamlit re-runs the whole script on every interaction, so the
+        # uploader still holds the file afterwards. Without remembering what
+        # was indexed, every later keystroke would re-upload it.
+        if upload is not None and st.session_state.get("indexed") != upload.file_id:
+            with st.spinner("Indexing..."):
+                upload_document(upload.name, upload.getvalue())
+            st.session_state.indexed = upload.file_id
+
+        documents = fetch_documents()
+        if documents:
+            for document in documents:
+                st.caption(f"📄 {document}")
+        else:
+            st.caption("No documents yet. Answers will not be grounded.")
 
     st.title("🤖 OmniAssist")
 

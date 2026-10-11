@@ -104,3 +104,16 @@ class InMemoryChunkRepository:
         owned = [row for row in self._rows if row[0] == user_id]
         ranked = sorted(owned, key=lambda row: cosine_distance(vector, row[2]))
         return [chunk for _, chunk, _ in ranked[:limit]]
+
+    def delete_document(self, user_id: uuid.UUID, document_name: str) -> None:
+        self._rows = [
+            row
+            for row in self._rows
+            if not (row[0] == user_id and row[1].document_name == document_name)
+        ]
+
+    def list_documents(self, user_id: uuid.UUID) -> list[str]:
+        names = {
+            chunk.document_name for owner, chunk, _ in self._rows if owner == user_id
+        }
+        return sorted(names)
