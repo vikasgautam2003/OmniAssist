@@ -2,7 +2,16 @@ import uuid
 from datetime import datetime
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import DateTime, ForeignKey, Index, String, Text, Uuid, func
+from sqlalchemy import (
+    JSON,
+    DateTime,
+    ForeignKey,
+    Index,
+    String,
+    Text,
+    Uuid,
+    func,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from app.embeddings.base import EMBEDDING_DIMENSIONS
@@ -46,6 +55,12 @@ class MessageRow(Base):
         Text,
         nullable=False,
     )
+
+    # Nullable because most turns are not tool turns. A tool call is a turn in
+    # the conversation, so it belongs on this table rather than beside it.
+    tool_calls: Mapped[list[dict[str, str]] | None] = mapped_column(JSON, nullable=True)
+
+    tool_call_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

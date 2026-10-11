@@ -2,6 +2,7 @@ import uuid
 
 import pytest
 
+from app.domain import Message
 from app.repositories.base import ConversationNotFoundError
 from app.repositories.memory import InMemoryChunkRepository
 from app.services.retrieval import Retriever
@@ -30,12 +31,12 @@ def test_history_accumulates_across_turns(
     messages = fake.calls[-1]
 
     assert len(messages) == 3
-    assert messages[0]["role"] == "user"
-    assert messages[0]["content"] == "hi"
-    assert messages[1]["role"] == "assistant"
-    assert messages[1]["content"] == "hello"
-    assert messages[2]["role"] == "user"
-    assert messages[2]["content"] == "how are you?"
+    assert messages[0].role == "user"
+    assert messages[0].content == "hi"
+    assert messages[1].role == "assistant"
+    assert messages[1].content == "hello"
+    assert messages[2].role == "user"
+    assert messages[2].content == "how are you?"
 
 
 def test_trimming_limits_what_is_sent(
@@ -68,7 +69,7 @@ def test_get_history_returns_a_copy(
     "".join(service.stream_reply("c1", user_id, "hello"))
 
     history = service.get_history("c1", user_id)
-    history.append({"role": "user", "content": "fake message"})
+    history.append(Message(role="user", content="fake message"))
 
     assert len(service.get_history("c1", user_id)) == 2
 
@@ -135,9 +136,9 @@ def test_retrieved_passages_reach_the_model(
     "".join(service.stream_reply("c1", user_id, "the refund window is 30 days"))
 
     sent = fake.calls[0]
-    assert sent[0]["role"] == "system"
-    assert "the refund window is 30 days" in sent[0]["content"]
-    assert "policy.pdf" in sent[0]["content"]
+    assert sent[0].role == "system"
+    assert "the refund window is 30 days" in sent[0].content
+    assert "policy.pdf" in sent[0].content
 
 
 def test_history_stores_the_raw_question_not_the_augmented_prompt(
@@ -151,8 +152,8 @@ def test_history_stores_the_raw_question_not_the_augmented_prompt(
     "".join(service.stream_reply("c1", user_id, "how long for a refund?"))
 
     stored = service.get_history("c1", user_id)
-    assert stored[0] == {"role": "user", "content": "how long for a refund?"}
-    assert all("Passages:" not in message["content"] for message in stored)
+    assert stored[0] == Message(role="user", content="how long for a refund?")
+    assert all("Passages:" not in message.content for message in stored)
 
 
 def test_the_grounding_instruction_is_sent(
@@ -163,7 +164,7 @@ def test_the_grounding_instruction_is_sent(
 
     "".join(service.stream_reply("c1", user_id, "anything"))
 
-    assert "say so plainly rather than guessing" in fake.calls[0][0]["content"]
+    assert "say so plainly rather than guessing" in fake.calls[0][0].content
 
 
 def test_no_retriever_means_no_context_block(
@@ -173,7 +174,7 @@ def test_no_retriever_means_no_context_block(
 
     "".join(service.stream_reply("c1", user_id, "hello"))
 
-    assert all(message["role"] != "system" for message in fake.calls[0])
+    assert all(message.role != "system" for message in fake.calls[0])
 
 
 def test_nothing_retrieved_leaves_the_prompt_alone(
@@ -186,4 +187,4 @@ def test_nothing_retrieved_leaves_the_prompt_alone(
 
     "".join(service.stream_reply("c1", user_id, "what is the capital of France?"))
 
-    assert all(message["role"] != "system" for message in fake.calls[0])
+    assert all(message.role != "system" for message in fake.calls[0])

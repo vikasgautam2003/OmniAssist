@@ -6,7 +6,21 @@ from sqlalchemy.exc import IntegrityError
 
 from app.db.models import Conversation, DocumentChunk, MessageRow, UserRow
 from app.db.session import get_session_factory
-from app.domain import Chunk, Message, User, Vector
+from app.domain import Chunk, Message, ToolCall, User, Vector
+
+
+def _from_row(row: MessageRow) -> Message:
+    return Message(
+        role=row.role,
+        content=row.content,
+        tool_calls=tuple(
+            ToolCall(id=c["id"], name=c["name"], arguments=c["arguments"])
+            for c in (row.tool_calls or [])
+        ),
+        tool_call_id=row.tool_call_id,
+    )
+
+
 from app.repositories.base import ConversationNotFoundError, EmailAlreadyExistsError
 
 
@@ -55,7 +69,7 @@ class PostgresConversationRepository:
                     )
                 )
 
-            return [{"role": row.role, "content": row.content} for row in rows]
+            return [_from_row(row) for row in rows]
 
     def add_message(
         self, conversation_id: str, user_id: uuid.UUID, message: Message
@@ -83,8 +97,21 @@ class PostgresConversationRepository:
             session.add(
                 MessageRow(
                     conversation_id=conversation_id,
-                    role=message["role"],
-                    content=message["content"],
+                    role=message.role,
+                    content=message.content,
+                    tool_calls=(
+                        [
+                            {
+                                "id": c.id,
+                                "name": c.name,
+                                "arguments": c.arguments,
+                            }
+                            for c in message.tool_calls
+                        ]
+                        if message.tool_calls
+                        else None
+                    ),
+                    tool_call_id=message.tool_call_id,
                 )
             )
 

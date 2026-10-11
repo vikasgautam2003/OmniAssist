@@ -47,7 +47,7 @@ class ChatService:
         self._repository.add_message(
             conversation_id,
             user_id,
-            {"role": "user", "content": user_message},
+            Message(role="user", content=user_message),
         )
 
         trimmed = self._repository.get_history(
@@ -81,10 +81,10 @@ class ChatService:
         if not chunks:
             return history
 
-        grounding: Message = {
-            "role": "system",
-            "content": GROUNDING.format(passages=_format_passages(chunks)),
-        }
+        grounding = Message(
+            role="system",
+            content=GROUNDING.format(passages=_format_passages(chunks)),
+        )
         return [grounding, *history]
 
     def _stream(
@@ -99,7 +99,7 @@ class ChatService:
         self._repository.add_message(
             conversation_id,
             user_id,
-            {"role": "assistant", "content": "".join(pieces)},
+            Message(role="assistant", content="".join(pieces)),
         )
 
     def get_history(self, conversation_id: str, user_id: uuid.UUID) -> list[Message]:
