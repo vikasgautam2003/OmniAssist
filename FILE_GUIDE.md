@@ -528,6 +528,12 @@ What the project is and how to run it.
 ### `BUILD_LOG.md`
 The chronological record: what was built in each step, in order.
 
+### `DESIGN_v0.3.md`
+The design for the tool-use framework, written before any code. Settles how
+tools are declared, how the loop is bounded, why streaming and tools conflict,
+what happens when a tool fails, why `Message` must stop being a `dict`, and why
+Block 1 ships no tool with side effects.
+
 ### `LEARN_SHEET.md`
 Concepts C1–C75 and decisions D1–D30, each with the alternative that was
 rejected and why. The primary interview source.
@@ -537,5 +543,5 @@ This document.
 
 ---
 
-*Updated through Step 4.6 and the UI redesign. Revise when
+*Updated through v0.2 (shipped) and the v0.3 design. Revise when
 files are added, removed, or change purpose.*

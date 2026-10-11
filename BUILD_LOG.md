@@ -12,8 +12,8 @@
 | Version | Adds | Status |
 |---|---|---|
 | **v0.1** | Streaming chatbot with history | ✅ **shipped** |
-| v0.2 | Postgres, auth, PDF upload + RAG, pytest | 🔄 in progress |
-| v0.3 | Tool-use framework, Redis cache, Celery jobs, structured logging | ⬜ |
+| **v0.2** | Postgres, auth, PDF upload + RAG, pytest | ✅ **shipped** `v0.2` |
+| v0.3 | Tool-use framework, Redis cache, Celery jobs, structured logging | 🔄 design done |
 | v0.4 | Multi-tenancy, RBAC, Docker, AWS deploy, CD | ⬜ |
 | v1.0 | Monitoring, alerting, LLM evals, load testing, cost tracking | ⬜ |
 
@@ -462,6 +462,35 @@ question ──embed──► similarity search ◄─────────�
 GitHub's **"Update branch"** button merged `main` into the feature branch and resolved five files in `main`'s favour, discarding the Step 4.4 changes to them. PR #15 squashed *that* merge commit rather than the pushed work, so `main` stopped importing entirely: `db/models.py` imports `EMBEDDING_DIMENSIONS`, which `embeddings/base.py` no longer defined.
 
 CI reported `failure` on `main` for **two consecutive merges** and nobody looked. See C80 and C81.
+
+---
+
+## 🔄 v0.3 — Tool use (design done, build pending)
+
+**Design:** `DESIGN_v0.3.md`, written before any code. The questions it settles
+— how tools are declared, how the loop is bounded, why streaming and tools
+conflict, what a failing tool does, and that `Message` must stop being a dict —
+each change the shape of code in three layers at once.
+
+**The hinge of the whole project.** Today a new capability is new application
+code. After Block 1 it is a new *tool*, which is why blocks 2–4 are hours each
+rather than days.
+
+| # | Block | Status |
+|---|-------|--------|
+| 1 | Tool-use framework: `Tool` protocol, registry, bounded loop, `Message` refactor | ⬜ |
+| 2 | Document generation (PDF) as a tool | ⬜ |
+| 3 | Spreadsheet generation (CSV / Excel) as a tool | ⬜ |
+| 4 | Charts and data analysis as a tool | ⬜ |
+| 5 | Background jobs — Celery + Redis; moves indexing out of the request (D36) | ⬜ |
+| 6 | Structured logging — latency, tokens and cost per request | ⬜ |
+
+**Decisions already taken (D38–D42):** tools declared vendor-neutrally in JSON
+Schema with the adapter translating · the loop bounded by `max_tool_iterations`
+· tool loop runs non-streaming, only the final answer streams · `Message`
+becomes a dataclass carrying tool fields · **no tool with side effects in Block
+1**, because a tool catalogue turns prompt injection from speech into action
+(C90).
 
 ---
 
