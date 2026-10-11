@@ -7,10 +7,16 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.clients.factory import get_llm_client
+from app.config import get_settings
+from app.embeddings.factory import get_embedder
 from app.repositories.base import ConversationNotFoundError
-from app.repositories.postgres import PostgresConversationRepository
+from app.repositories.postgres import (
+    PostgresChunkRepository,
+    PostgresConversationRepository,
+)
 from app.routes.deps import CurrentUser
 from app.services.chat import ChatService
+from app.services.retrieval import Retriever
 
 router = APIRouter()
 
@@ -22,7 +28,14 @@ def get_chat_service() -> ChatService:
     Cached so conversation history survives between requests; lazy so that
     importing this module requires no credentials.
     """
-    return ChatService(get_llm_client(), PostgresConversationRepository())
+    retriever = Retriever(
+        get_embedder(),
+        PostgresChunkRepository(),
+        top_k=get_settings().retrieval_top_k,
+    )
+    return ChatService(
+        get_llm_client(), PostgresConversationRepository(), retriever=retriever
+    )
 
 
 class ChatRequest(BaseModel):

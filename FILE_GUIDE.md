@@ -239,8 +239,29 @@ its body ran until the first chunk was requested**, so the ownership check fired
 status code. The fix was an eager/lazy split — validation runs immediately, only
 streaming is deferred.
 
-**Fits** — called by `routes/chat.py`, depends on the repository and LLM
-Protocols, knows nothing about FastAPI.
+It also owns **grounding**. When a retriever is attached, retrieved passages are
+prepended as a system message for that one model call — and the **raw question**
+is what goes into history. Storing the augmented prompt would grow history by
+thousands of characters per turn and re-send context retrieved for an older
+question. With nothing retrieved the prompt is left alone, since an empty
+context block makes the assistant refuse questions it could answer.
+
+**Fits** — called by `routes/chat.py`, depends on the repository, LLM and
+retriever interfaces, knows nothing about FastAPI.
+
+### `app/services/retrieval.py`
+**Is** — `Retriever`: embeds a question and returns the passages closest to it.
+
+**Why** — its own class rather than two more collaborators bolted onto
+`ChatService`, which already has a client and a repository. This owns one job —
+*turn a question into relevant passages* — and can be tested without a
+conversation, a client or a history. A blank question retrieves nothing, because
+embedding whitespace returns an arbitrary nearest neighbour and would present it
+to the model as relevant.
+
+**Fits** — between `ChatService` and the chunk repository. Holds an `Embedder`
+and a `ChunkRepository`, both as interfaces, so tests use a fake embedder and a
+dictionary.
 
 ### `app/services/pdf.py`
 **Is** — `extract_text(data: bytes) -> str` and `PdfExtractionError`.
@@ -410,6 +431,10 @@ which is the test that caught the data-loss bug.
 Determinism, width, empty input, ordering, and a one-line **protocol conformance
 proof** that mypy checks at build time.
 
+### `tests/test_retrieval.py`
+Closest-passage ordering, `top_k`, per-user scoping, blank questions, an empty
+store, and that citation details survive retrieval.
+
 ### `tests/test_chunk_repository.py`
 Round-trip, ordering by similarity, `limit`, the mismatched-lengths guard, and
 **another user's chunks being invisible**.
@@ -457,5 +482,5 @@ This document.
 
 ---
 
-*Updated through Step 4.4 (vector storage and similarity search). Revise when
+*Updated through Step 4.5 (retrieval wired into chat). Revise when
 files are added, removed, or change purpose.*

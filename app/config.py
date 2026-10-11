@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     chunk_overlap: int = 150
 
     embedding_provider: Literal["local", "gemini"] = "local"
+    retrieval_top_k: int = 4
 
     app_env: Literal["local", "staging", "production"] = "local"
 
