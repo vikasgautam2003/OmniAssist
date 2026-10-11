@@ -377,6 +377,94 @@ Sign up in one browser, sign up in a private window, and confirm neither can see
 
 ---
 
+## ✅ v0.2 · BLOCK 4 — RAG (retrieval-augmented generation)
+
+**Goal:** upload a PDF and ask questions about it. The assistant answers from *your* document, not from its training data.
+
+```bash
+uv add pypdf fastembed pgvector
+```
+
+**The pipeline**
+
+```
+PDF ──extract──► text ──chunk──► passages ──embed──► vectors ──store──► pgvector
+                                                                            │
+question ──embed──► similarity search ◄─────────────────────────────────────┘
+                           │
+                    top-k passages ──► grounded prompt ──► LLM ──► streamed answer
+```
+
+**Step 4.1 — PDF to text**
+
+| File | Purpose |
+|---|---|
+| `app/services/pdf.py` | `extract_text(bytes)` + `PdfExtractionError` |
+| `tests/fakes.py` | `make_pdf()` — a real PDF assembled byte by byte, no reportlab |
+
+- Takes **bytes**, not a path or an upload object: no filesystem, no HTTP, testable in one line
+- One `except PyPdfError` contains all fourteen of the library's error types — they share a base class
+- A document with **no text layer** (a scan) is rejected with an OCR hint. An upload that appears to succeed while storing nothing is a worse failure than an error.
+
+**Step 4.2 — Chunking**
+
+| File | Purpose |
+|---|---|
+| `app/services/chunking.py` | `chunk_text(text, *, size, overlap)` |
+| `app/config.py` | `chunk_size=1000`, `chunk_overlap=150` |
+
+- Keyword-only arguments: `chunk_text(body, 150, 1000)` type-checks perfectly and silently produces garbage
+- Boundary preference paragraph → line → sentence → space, restricted to the **last fifth** of the window so one early space cannot produce a 7-character chunk
+- 🔴 **Review caught silent data loss.** `start += size - overlap` ignored the boundary-adjusted `end`; 32 of 45 characters vanished with no error. Fixed with `start = max(end - overlap, start + 1)`. The test that found it asserts *conservation* — no input text is lost — not behaviour.
+
+**Step 4.3 — Embeddings**
+
+| File | Purpose |
+|---|---|
+| `app/embeddings/base.py` | `Embedder` protocol, `EmbeddingError`, `EMBEDDING_DIMENSIONS` |
+| `app/embeddings/local.py` | `LocalEmbedder` — `bge-small-en-v1.5` via fastembed, 384 dims |
+| `app/embeddings/factory.py` | `get_embedder()`, cached |
+| `tests/fakes.py` | `FakeEmbedder` — deterministic vectors from a hash |
+
+- **Embedders are not interchangeable like LLM providers.** Dimensions differ, and even at equal width the semantic spaces differ — a mismatch returns plausible nonsense, not an error. Hence `dimensions` (schema derived, not guessed) and `model_id` (stale vectors detectable).
+- Queries and documents are embedded by **separate methods**: bge wants an instruction prefix on queries only
+- `LocalEmbedder` is imported **inside** the factory, so importing the factory does not load onnxruntime. No test constructs it — CI never downloads the 130 MB model.
+
+**Step 4.4 — Vector storage**
+
+| File | Purpose |
+|---|---|
+| `app/db/models.py` | `DocumentChunk` — `vector(384)`, `document_name`, `chunk_index`, `model_id` |
+| `app/repositories/{base,memory,postgres}.py` | `ChunkRepository` + both implementations |
+| `migrations/…create_document_chunks.py` | **hand-written** |
+
+- Autogenerate would never emit `CREATE EXTENSION IF NOT EXISTS vector` — it diffs models and has no concept of a missing extension
+- The width is a literal in the migration on purpose: a migration must build the same schema a year from now, so it cannot read today's config
+- **No vector index yet.** HNSW and IVFFlat are both approximate; a sequential scan at this scale is exact and fast, and IVFFlat built on an empty table locks in poor recall.
+- `search()` filters by `user_id` **inside the query** — unscoped retrieval answers one user from another's documents
+- Cosine distance (`<=>`) because that is what the model was trained for; a different operator ranks worse with no error
+
+**Step 4.5 — Retrieval into chat**
+
+| File | Purpose |
+|---|---|
+| `app/services/retrieval.py` | `Retriever.find(user_id, question)` |
+| `app/services/chat.py` | optional retriever; grounded system message |
+| `app/config.py` | `retrieval_top_k=4` |
+
+- **The augmented prompt is never stored.** History keeps the raw question: storing passages would grow history by thousands of characters per turn and re-send context retrieved for an older question.
+- Nothing retrieved → prompt untouched. An empty context block makes the assistant refuse questions it could answer.
+- The grounding instruction's third line — *say so plainly when the passages do not contain the answer* — is most of the difference between RAG and a chatbot that was shown some text
+- ⚠️ **Prompt injection is unmitigated and logged as D32.** Retrieved text enters the prompt and the model cannot tell instructions from data.
+
+**🔴 Incident — `main` broken by an automatic branch update**
+
+GitHub's **"Update branch"** button merged `main` into the feature branch and resolved five files in `main`'s favour, discarding the Step 4.4 changes to them. PR #15 squashed *that* merge commit rather than the pushed work, so `main` stopped importing entirely: `db/models.py` imports `EMBEDDING_DIMENSIONS`, which `embeddings/base.py` no longer defined.
+
+CI reported `failure` on `main` for **two consecutive merges** and nobody looked. See C80 and C81.
+
+---
+
 ## 🔁 STANDARD WORKFLOW (every block)
 
 ```bash

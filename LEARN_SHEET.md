@@ -23,6 +23,7 @@
 | **D10** | **v0.1 runs on Groq free tier — `llama-3.3-70b-versatile`** | Budget is $0. Groq = ~1,000 req/day, 30 RPM, **no credit card, ongoing**; Anthropic has no free tier. v0.1 needs ~200 requests total. ⚠️ **Groq ≠ Grok** — Groq is an inference provider serving open-weight models (free); Grok is xAI's model ($25 credits then paid). Config is provider-neutral: `LLM_PROVIDER` / `LLM_API_KEY` / `LLM_MODEL`. | Yes — that's the point of D8 |
 | **D11** | **Conversation history must be trimmed** (Block 4), not left unbounded | Groq's free tier caps ~**14,400 tokens/minute**. Per C10, a 40-turn conversation is ~40K tokens in *one* request — over the entire per-minute budget. **A limit that makes you build it right beats unlimited quota that lets you build it wrong.** | No |
 | **D13** | **Model switched to `openai/gpt-oss-120b`** on Groq | Changed by editing **one line of `.env`** — zero code changes. Live proof that D3 + D8 work. | Yes — one line |
+| **D33** | **Update a branch by pulling locally (`git pull --rebase`), never with GitHub's "Update branch" button** | The button merges server-side and, when it cannot merge cleanly, picks a side instead of stopping. It discarded five files' worth of work and the pull request then squashed *that* commit, leaving `main` unable to import. A local pull puts the conflict in front of you. | Yes — but the cost of getting it wrong is a broken `main` |
 | **D32** | **Prompt injection is a known, unmitigated hole** — recorded rather than silently ignored | Retrieved document text is placed in the prompt, so a PDF containing *"ignore your instructions"* is an injection vector. Defending it properly needs input/output filtering and privilege separation, which is v1.0 work. Writing the limitation down beats discovering it in an interview. | n/a — tracked |
 | **D31** | **Context is injected as a system message; the raw question is what gets stored** | The alternative, storing the augmented prompt, grows history by thousands of characters per turn, re-sends context retrieved for an older question, and hides what the user actually asked. Context is an input to one model call, not a fact about the conversation. | Yes |
 | **D30** | **Guarantee loop progress with a clamp**, rather than tightening the `overlap < size` guard | The guard is checked once, at the door, and cannot see what the boundary search does to `end` inside the loop. `size=1000, overlap=900` passes it and still moves `start` backwards. Tightening to `overlap < size * 0.8` would also reject configurations that work. `max(end - overlap, start + 1)` makes progress structural instead of conditional. | Yes |
@@ -752,6 +753,60 @@ The same shape as SQL injection — data crossing into a control channel — but
 without the equivalent of a parameterised query, because the model has only one
 channel. Logged as D32 rather than quietly ignored; real mitigation is v1.0 work.
 
+### C80 — A squash merge plus an automatic branch update can silently delete work
+The sequence that broke `main`:
+
+1. Step 4.4 moved `EMBEDDING_DIMENSIONS` into `app/embeddings/base.py`, and
+   `db/models.py` began importing it from there
+2. PR #13 **squash**-merged the earlier state of those files into `main`
+3. GitHub's **"Update branch"** merged `main` back into the feature branch.
+   Git saw both sides modify the same files and resolved five of them in
+   `main`'s favour — **silently discarding the 4.4 changes**
+4. PR #15 squashed *that merge commit*, not the commit that had been pushed and
+   tested
+
+Result: `main` could not import at all. `db/models.py` imported a name
+`embeddings/base.py` no longer defined, and `routes/chat.py` read a setting
+`config.py` no longer had.
+
+The root cause is that **a squash merge destroys the shared history** a later
+merge needs to reason correctly. After a squash the branch and `main` contain
+the same *work* through unrelated *commits*, so git has no basis for deciding
+which side is newer and falls back to heuristics.
+
+**Three habits that each would have prevented it:**
+- Delete a branch after its PR merges; never commit to it again (the same
+  lesson PR #10 taught, ignored twice more)
+- Update a branch with `git pull --rebase` locally, which stops on conflicts
+  instead of choosing
+- Check what a PR will actually merge: `gh pr view <n> --json headRefOid`
+  against what you pushed. They were different commits here.
+
+### C81 — A red build nobody reads is not a gate
+CI reported `failure` on `main` for **two consecutive merges** before anyone
+noticed, and the second of those failures was `main` being unable to start.
+
+The pipeline worked perfectly. It ran, it failed, it reported. The control was
+not the pipeline — it was *someone looking at it*, and that part did not exist.
+
+Two things follow. **Check after every merge** — `gh run list --branch main
+--limit 1` costs two seconds. And **a failing build must block something**:
+branch protection that refuses a merge while CI is red converts a notification
+nobody reads into a gate that cannot be walked past. A warning that costs
+nothing to ignore will be ignored.
+
+Worth saying plainly in an interview: the tooling was right and the process
+around it was missing. That is where most real outages live.
+
+### C82 — Verify a repair before proposing it, not after
+The fix was checked by extracting `main` into a temporary directory, copying in
+the five correct files, and running the import, the tests and all three
+static checks there — **before** touching the repository.
+
+Cheap, and it converts "this should work" into "this does work". The same
+instinct as the chunking conservation test: assert the property, do not assume
+it.
+
 ---
 
 ## 📊 REFERENCE — LLM API pricing (2026-08-02)
@@ -898,3 +953,4 @@ Plus a module-name collision caught by mypy → C35 / D15.
 | 2026-10-11 | **Step 4.2** — `app/services/chunking.py`: overlapping chunks with boundary preference (paragraph → line → sentence → space) bounded to the last fifth of the window. Review found **silent data loss** — 32 of 45 characters dropped — caused by a fixed stride ignoring the adjusted end; fixed by deriving `start` from `end` with a progress clamp. 8 tests including a conservation check. Concepts C67–C71, decisions D29–D30 |
 | 2026-10-11 | **Step 4.3** — `app/embeddings/`: `Embedder` protocol exposing `model_id` and `dimensions`, `LocalEmbedder` on `fastembed`/`bge-small-en-v1.5` (384 dims), `FakeEmbedder` for tests, factory with a lazy inner import verified not to load `onnxruntime`. 6 tests; no model download in CI. Concepts C72–C75, decisions D27–D28 |
 | 2026-10-11 | **Step 4.5** — retrieval wired into chat. `Retriever` turns a question into passages; `ChatService` takes an optional retriever and prepends a grounded system message carrying the passages and their document names. The raw question is what reaches history. 11 new tests including the stale-context regression. Concepts C76–C79, decisions D31–D32 |
+| 2026-10-11 | **🔴 Incident — `main` broken by an automatic branch update.** GitHub's "Update branch" resolved five files in `main`'s favour, discarding Step 4.4 changes; PR #15 squashed that merge commit rather than the pushed work, and `main` stopped importing. CI had reported `failure` on `main` for two consecutive merges unnoticed. Fix verified in a scratch checkout before being proposed. Concepts C80–C82, decision D33 |
