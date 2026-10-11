@@ -1,0 +1,19 @@
+# Theme tokens Streamlit applies before any of our CSS runs. Setting them here
+# rather than only in CSS means the chrome Streamlit draws itself -- scrollbars,
+# tooltips, the file-uploader dropzone -- matches the rest of the interface.
+[theme]
+base = "dark"
+primaryColor = "#7C6CFF"
+backgroundColor = "#0D1117"
+secondaryBackgroundColor = "#151B23"
+textColor = "#E6EDF3"
+font = "sans serif"
+
+[client]
+toolbarMode = "minimal"
+
+[server]
+runOnSave = true
+# Matches max_upload_bytes in app/config.py, so the dropzone advertises the
+# real limit instead of Streamlit's 200MB default.
+maxUploadSize = 10

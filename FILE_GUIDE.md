@@ -249,6 +249,21 @@ context block makes the assistant refuse questions it could answer.
 **Fits** — called by `routes/chat.py`, depends on the repository, LLM and
 retriever interfaces, knows nothing about FastAPI.
 
+### `app/services/indexing.py`
+**Is** — `Indexer`: turns an uploaded PDF into stored, embedded passages.
+
+**Why** — the write-side mirror of `Retriever`, composing extraction, chunking
+and embedding in order. Two properties matter more than the composition:
+re-uploading a document **replaces** its passages rather than appending (otherwise
+retrieval spends half its context budget repeating itself), and extraction and
+embedding both complete **before** anything is deleted or written, so a failed
+upload can neither leave a half-indexed document behind nor destroy a good
+earlier version.
+
+**Fits** — called by `routes/documents.py`. Holds an `Embedder` and a
+`ChunkRepository` as interfaces, so tests index a real PDF with no model and no
+database.
+
 ### `app/services/retrieval.py`
 **Is** — `Retriever`: embeds a question and returns the passages closest to it.
 
@@ -305,6 +320,20 @@ user's conversation.
 **identical** errors, and login compares against a dummy hash when the email is
 unknown so response time does not reveal whether an account exists.
 
+### `app/routes/documents.py`
+**Is** — `POST /documents` (upload and index) and `GET /documents` (list names).
+
+**Why** — the upload boundary. Size is checked **before** the body is read,
+because `await file.read()` on a huge upload exhausts memory and FastAPI imposes
+no limit of its own; the length is re-checked afterwards, since a declared size
+is a client claim. Errors map deliberately: **400** for a bad PDF, passing the
+extraction message through because it was written for the user and says what to
+do; **413** for oversize; **503** for an embedding failure, which is our fault
+and says nothing about our internals.
+
+**Fits** — above `Indexer`, below HTTP. Indexing happens inside the request for
+now; moving it to a queue is v0.3 work (D36).
+
 ### `app/routes/deps.py`
 **Is** — `get_current_user`, the `CurrentUser` alias, and `get_user_repository`.
 
@@ -347,9 +376,30 @@ by anyone holding it, so nothing secret goes inside.
 
 ## User interface
 
+### `ui/styles.py`
+**Is** — the interface's CSS, plus a `brand()` helper, as a single string.
+
+**Why** — Streamlit's theming API covers only a few colours, so everything past
+that is CSS aimed at its `data-testid` attributes. Keeping it here leaves the
+app module about behaviour. Those attributes are implementation details rather
+than a contract, so the selectors are deliberately narrow: an early blanket
+`[class*="st-"]` font rule also matched Streamlit's icon spans and rendered the
+password-reveal glyph as the literal text "visibili".
+
+**Fits** — imported by `streamlit_app.py` and injected once per run. Paired with
+`.streamlit/config.toml`, which sets the theme tokens Streamlit applies to its
+own chrome before any of this CSS runs.
+
+### `.streamlit/config.toml`
+**Is** — theme colours, minimal toolbar, and `maxUploadSize`.
+
+**Why** — the tokens here style what Streamlit draws itself, which CSS cannot
+reach. `maxUploadSize = 10` matches `max_upload_bytes` in `app/config.py`, so
+the dropzone advertises the real limit instead of the 200 MB default.
+
 ### `ui/streamlit_app.py`
 **Is** — the web interface: login and signup tabs, chat with streaming output,
-logout.
+a sidebar PDF uploader with the list of indexed documents, and logout.
 
 **Why** — a usable front end in Python while the API stabilises; React arrives
 in v0.4. The UI calls the API over HTTP rather than importing the services, so
@@ -431,6 +481,11 @@ which is the test that caught the data-loss bug.
 Determinism, width, empty input, ordering, and a one-line **protocol conformance
 proof** that mypy checks at build time.
 
+### `tests/test_indexing.py`
+End-to-end indexing with fakes, **replace-not-append** on re-upload, that a
+failed extraction stores nothing, that a failed re-upload leaves the previous
+version intact, and per-user isolation of both upload and delete.
+
 ### `tests/test_retrieval.py`
 Closest-passage ordering, `top_k`, per-user scoping, blank questions, an empty
 store, and that citation details survive retrieval.
@@ -482,5 +537,5 @@ This document.
 
 ---
 
-*Updated through Step 4.5 (retrieval wired into chat). Revise when
+*Updated through Step 4.6 and the UI redesign. Revise when
 files are added, removed, or change purpose.*
