@@ -1,6 +1,8 @@
 from typing import Protocol
 
-Vector = list[float]
+from app.domain import Vector
+
+EMBEDDING_DIMENSIONS = 384
 
 
 class EmbeddingError(Exception):

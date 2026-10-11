@@ -68,7 +68,6 @@ def make_pdf(text: str) -> bytes:
     return bytes(out)
 
 
-
 class FakeEmbedder:
     """Deterministic vectors from a hash: no model, no download, no network."""
 
@@ -94,4 +93,3 @@ class FakeEmbedder:
         raw = [byte / 255 for byte in digest]
         length = math.sqrt(sum(value * value for value in raw)) or 1.0
         return [value / length for value in raw]
-
