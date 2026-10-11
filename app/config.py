@@ -22,7 +22,6 @@ class Settings(BaseSettings):
     llm_model: str = "llama-3.3-70b-versatile"
     max_tokens: int = 4096
 
-  
     chunk_size: int = 1000
     chunk_overlap: int = 150
 

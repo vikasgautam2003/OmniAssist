@@ -1,8 +1,11 @@
 import uuid
 from datetime import datetime
 
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import DateTime, ForeignKey, Index, String, Text, Uuid, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+from app.embeddings.base import EMBEDDING_DIMENSIONS
 
 
 class Base(DeclarativeBase):
@@ -69,4 +72,36 @@ class UserRow(Base):
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class DocumentChunk(Base):
+    """A chunk of an uploaded document, stored with the vector that finds it."""
+
+    __tablename__ = "document_chunks"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+
+    document_name: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    chunk_index: Mapped[int] = mapped_column(nullable=False)
+
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+
+    embedding: Mapped[list[float]] = mapped_column(
+        Vector(EMBEDDING_DIMENSIONS), nullable=False
+    )
+
+    model_id: Mapped[str] = mapped_column(String(100), nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    __table_args__ = (
+        Index("ix_document_chunks_user_document", "user_id", "document_name"),
     )

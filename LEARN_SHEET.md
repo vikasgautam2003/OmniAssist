@@ -23,6 +23,10 @@
 | **D10** | **v0.1 runs on Groq free tier — `llama-3.3-70b-versatile`** | Budget is $0. Groq = ~1,000 req/day, 30 RPM, **no credit card, ongoing**; Anthropic has no free tier. v0.1 needs ~200 requests total. ⚠️ **Groq ≠ Grok** — Groq is an inference provider serving open-weight models (free); Grok is xAI's model ($25 credits then paid). Config is provider-neutral: `LLM_PROVIDER` / `LLM_API_KEY` / `LLM_MODEL`. | Yes — that's the point of D8 |
 | **D11** | **Conversation history must be trimmed** (Block 4), not left unbounded | Groq's free tier caps ~**14,400 tokens/minute**. Per C10, a 40-turn conversation is ~40K tokens in *one* request — over the entire per-minute budget. **A limit that makes you build it right beats unlimited quota that lets you build it wrong.** | No |
 | **D13** | **Model switched to `openai/gpt-oss-120b`** on Groq | Changed by editing **one line of `.env`** — zero code changes. Live proof that D3 + D8 work. | Yes — one line |
+| **D30** | **Guarantee loop progress with a clamp**, rather than tightening the `overlap < size` guard | The guard is checked once, at the door, and cannot see what the boundary search does to `end` inside the loop. `size=1000, overlap=900` passes it and still moves `start` backwards. Tightening to `overlap < size * 0.8` would also reject configurations that work. `max(end - overlap, start + 1)` makes progress structural instead of conditional. | Yes |
+| **D29** | **Chunk size 1000 / overlap 150 live in `Settings`, not as module constants** | These are the main quality knob of retrieval and will be tuned once real documents are indexed. A number you intend to change is configuration by definition; burying it in code guarantees it is changed in the wrong place later. | Yes |
+| **D28** | **`bge-small-en-v1.5` (384 dims) via `fastembed`**, not `sentence-transformers` | `fastembed` pulls 4 packages and runs on ONNX; `sentence-transformers` pulls ~25 including torch. Same model family, a fraction of the install. Cosine is the trained objective, which fixes the pgvector operator as `<=>`. | Yes — behind the `Embedder` protocol |
+| **D27** | **Embeddings run locally first, hosted later, behind an `Embedder` protocol** | Groq serves no embedding model (verified against its `/models` endpoint), so the LLM provider cannot supply them. A local model costs nothing per request, which matters on a zero budget, and keeps CI free of network calls. The protocol exists because the hosted swap is coming, not because it might. | Yes, but **not free**: changing embedder invalidates every stored vector and forces a re-index — unlike swapping the LLM |
 | **D26** | **Ownership is enforced in the repository's `WHERE` clause**, not checked in the service | Both work today. The difference is the next code path — an admin view, a background job, an export endpoint — where a service-level check can be forgotten. A filter inside the query cannot be, because there is no query without it. **Make the secure path the only path.** | No |
 | **D25** | **Minimum password length 12, no composition rules** | Current NIST guidance: length is what matters. Forcing uppercase/digit/symbol produces `Password1!` and a sticky note — it reduces entropy by making passwords predictable while feeling stricter. | Yes |
 | **D24** | **React/Next.js stays at v0.4**, Streamlit until then | Streamlit already proves the backend end to end, and the API is UI-agnostic (SSE + JSON), so swapping clients is replacing one consumer rather than rewriting anything. Building login screens now against an auth model that multi-tenancy will change in v0.4 means building them twice. | Yes |
@@ -585,6 +589,129 @@ The password goes into a form field, is posted once, and is never written to `se
 
 This is the full **auth flow**, not just an auth check: credentials → token → stored → attached to every request → expired → back to login. The same five stages appear in React in v0.4; only the syntax differs.
 
+### C65 — One `except` for a whole library's error family
+`pypdf` raises fourteen distinct exception types, and every one of them inherits
+from `PyPdfError`. A single `except PyPdfError` therefore contains the entire
+library, and the caller is handed a project-defined `PdfExtractionError` instead.
+
+The general rule: **check whether a library gives its exceptions a common base
+before enumerating them.** Most mature libraries do. Catching the base is not
+laziness — it is the difference between a boundary that holds and one that leaks
+a new exception type the next time the library is upgraded.
+
+### C66 — Silent success on useless input is worse than an error
+A scanned PDF parses perfectly and yields zero text. Indexing it "succeeds": the
+upload returns 200, nothing is stored, and the user discovers three questions
+later that the assistant knows nothing about their document.
+
+The failure has to surface **at the moment the user can still act on it**. Hence
+the explicit rejection with an OCR hint. Note the asymmetry that makes this
+correct rather than merely strict: an empty *page* is normal and is skipped; an
+empty *document* is rejected. A 40-page report with a scanned cover still indexes
+its other 39 pages.
+
+### C67 — Chunking is the retrieval unit
+Embedding a whole document produces one vector that is the *average* of
+everything the document says — and the average of fifty pages means nothing.
+Ask "what is the refund window?" and it will not match, because the document is
+mostly about other things.
+
+**The unit you store is the unit you get back.** You do not want the document
+that mentions refunds; you want the paragraph that states the window. Overlap
+exists for the same reason at a smaller scale: a cut that lands mid-sentence
+leaves neither chunk able to answer, so every idea must appear whole in at
+least one chunk.
+
+### C68 — Derive the cursor from where you actually stopped
+The chunker's first version advanced with `start += size - overlap` while the
+boundary search independently pulled `end` *backwards*. The two were computed
+from different premises, and whenever `end` moved further back than the stride,
+the text between them was covered by no chunk at all.
+
+Measured: **32 of 45 characters silently dropped.** No exception, no warning.
+The fix is one line — `start = end - overlap` — and the principle generalises far
+beyond chunking: **when a loop adjusts its endpoint, the next iteration must
+start from the adjusted value, never from the value you assumed it would take.**
+
+Also note what caught it. `ruff`, `mypy` and every mechanical test passed; the
+test that found it was *"does any input text fail to appear in the output"* — a
+**conservation check** rather than a behaviour check. Worth asking of any
+transform: what must be preserved, and does a test assert it?
+
+### C69 — A guard checked once cannot see what the loop does later
+`overlap >= size` is rejected at the door. It still permits `size=1000,
+overlap=900`, and once the boundary window pulls `end` back to `start + 800`,
+`end - overlap` lands *behind* `start` — an infinite loop that no test catches,
+because a hanging test produces no failure, just a stalled CI job.
+
+Entry validation covers the inputs; it cannot cover a value the loop computes
+later. Make progress structural (`max(end - overlap, start + 1)`) rather than
+relying on a precondition to imply it.
+
+### C70 — Bound the search for a "nicer" cut
+Searching the whole window for a boundary means one early space can end a chunk
+after seven characters. Long unbroken runs are ordinary in real documents —
+URLs, hashes, base64 blobs, CJK text without spaces.
+
+Restricting the search to the last fifth gives a cheap guarantee: a boundary is
+taken only when it is *nearly* where the hard cut would have been. **A clean
+hard cut beats a degenerate chunk**, and preference order (paragraph → line →
+sentence → space, first hit wins) beats "whichever marker appears latest".
+
+### C71 — Keyword-only parameters make a mistake unspellable
+`chunk_text(body, 150, 1000)` type-checks perfectly — both arguments are `int` —
+and silently produces garbage. A `*` in the signature forces
+`chunk_text(body, size=1000, overlap=150)` at every call site.
+
+Reach for this whenever **two adjacent parameters share a type and transposing
+them is not an error, only a wrong answer.** The type checker cannot help; the
+signature can.
+
+### C72 — Embeddings are not interchangeable the way LLM providers are
+Swapping Groq for Anthropic is harmless: old conversations still read fine. A
+vector, by contrast, is only meaningful against the model that produced it.
+
+Two separate failures follow. **Dimensions differ** — 384 for `bge-small`, 768
+for Gemini — so the `vector(384)` column breaks outright. Worse, even at
+matching widths **the semantic space differs**: the two models place the same
+sentence in unrelated coordinates, so similarity search returns noise with no
+error at all.
+
+This is why `dimensions` and `model_id` are on the protocol. Dimensions let the
+schema be derived rather than guessed; `model_id` is stored per row so stale
+vectors can be *detected* after a provider change. **Swapping the LLM is a config
+change; swapping the embedder invalidates the index.**
+
+### C73 — Queries and documents are embedded differently
+`bge` models expect an instruction prefix on queries (*"Represent this sentence
+for searching relevant passages:"*) and nothing on passages. Embed a query like
+a document and retrieval quality drops measurably, with no error.
+
+Two methods — `embed_query` and `embed_documents` — rather than one `embed()`
+make the mistake impossible to express. The batching asymmetry falls out of the
+same split: a document upload is hundreds of chunks (one round trip, not
+hundreds), a user question is always exactly one string.
+
+### C74 — Import cost is a design decision
+`from app.embeddings.local import LocalEmbedder` sits *inside* `get_embedder()`,
+not at module top. Verified: importing the factory loads nothing heavy, while
+importing `local` pulls in `fastembed` and `onnxruntime`.
+
+Without that, every importer of the factory — a test, a route, `main.py` at
+startup — pays for ONNX and tokenizers. Same discipline as `get_settings()`
+(C-series, lazy config): **importing a module must have no side effects and no
+meaningful cost.** The related guarantee is that no test constructs
+`LocalEmbedder`, so CI never downloads the 130 MB model.
+
+### C75 — A type annotation as a conformance proof
+`embedder: Embedder = FakeEmbedder()` is a one-line test that mypy checks at
+build time: if the protocol gains a method and the fake does not implement it,
+type-checking fails before a single test runs.
+
+This is the structural-typing payoff (the `Protocol`-over-`ABC` choice, applied
+for the fifth time): the fake inherits from nothing, yet conformance is still
+*proved* rather than hoped for.
+
 ---
 
 ## 📊 REFERENCE — LLM API pricing (2026-08-02)
@@ -727,3 +854,6 @@ Plus a module-name collision caught by mypy → C35 / D15.
 | 2026-10-04 | **Step 3.3c** — `POST /auth/signup` (201/409) and `/auth/login` (200/401) with email normalised once at the Pydantic boundary, identical errors for unknown-vs-wrong, and a constant-time failure path verified by measurement (53 ms vs 56 ms). Concepts C57–C58, decisions D24–D25 |
 | 2026-10-04 | **Steps 3.4–3.5** — `get_current_user` dependency (401 for every failure, user looked up not trusted), `conversations.user_id` FK + migration, ownership enforced in the `WHERE` clause, `/chat` now requires auth and returns 404 for another user's conversation. 8 tests including cross-user isolation. Concepts C59–C62, decision D26 |
 | 2026-10-04 | **Step 3.6 — Block 3 COMPLETE.** Streamlit auth gate: login/signup tabs, token in `session_state`, `Authorization: Bearer` on chat, 401-on-expiry returns to login, logout and new-conversation controls. API contract verified for all six status codes the UI branches on. Concepts C63–C64 |
+| 2026-10-05 | **Step 4.1** — `app/services/pdf.py`: text extraction behind a vendor-neutral `PdfExtractionError`; one `except PyPdfError` contains all fourteen library error types; a document with no text layer is rejected with an OCR hint rather than indexed silently. Hand-built PDF fixture so tests need no `reportlab`. 6 tests. Concepts C65–C66 |
+| 2026-10-11 | **Step 4.2** — `app/services/chunking.py`: overlapping chunks with boundary preference (paragraph → line → sentence → space) bounded to the last fifth of the window. Review found **silent data loss** — 32 of 45 characters dropped — caused by a fixed stride ignoring the adjusted end; fixed by deriving `start` from `end` with a progress clamp. 8 tests including a conservation check. Concepts C67–C71, decisions D29–D30 |
+| 2026-10-11 | **Step 4.3** — `app/embeddings/`: `Embedder` protocol exposing `model_id` and `dimensions`, `LocalEmbedder` on `fastembed`/`bge-small-en-v1.5` (384 dims), `FakeEmbedder` for tests, factory with a lazy inner import verified not to load `onnxruntime`. 6 tests; no model download in CI. Concepts C72–C75, decisions D27–D28 |
