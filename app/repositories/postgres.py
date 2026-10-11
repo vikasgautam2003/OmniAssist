@@ -1,6 +1,6 @@
 import uuid
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 
@@ -188,3 +188,26 @@ class PostgresChunkRepository:
             )
             for row in rows
         ]
+
+    def delete_document(self, user_id: uuid.UUID, document_name: str) -> None:
+        # user_id is in the WHERE clause here too: a delete that only matched
+        # on name would let one user erase another's document.
+        statement = delete(DocumentChunk).where(
+            DocumentChunk.user_id == user_id,
+            DocumentChunk.document_name == document_name,
+        )
+
+        with self._session_factory() as session:
+            session.execute(statement)
+            session.commit()
+
+    def list_documents(self, user_id: uuid.UUID) -> list[str]:
+        query = (
+            select(DocumentChunk.document_name)
+            .where(DocumentChunk.user_id == user_id)
+            .distinct()
+            .order_by(DocumentChunk.document_name)
+        )
+
+        with self._session_factory() as session:
+            return list(session.scalars(query).all())
