@@ -21,6 +21,13 @@ class Settings(BaseSettings):
     llm_provider: Literal["groq", "anthropic"] = "groq"
     llm_model: str = "llama-3.3-70b-versatile"
     max_tokens: int = 4096
+
+  
+    chunk_size: int = 1000
+    chunk_overlap: int = 150
+
+    embedding_provider: Literal["local", "gemini"] = "local"
+
     app_env: Literal["local", "staging", "production"] = "local"
 
 

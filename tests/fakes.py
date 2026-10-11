@@ -1,3 +1,5 @@
+import hashlib
+import math
 from collections.abc import Iterator
 
 from app.domain import Message
@@ -64,3 +66,32 @@ def make_pdf(text: str) -> bytes:
     out += b"startxref\n" + str(xref_at).encode() + b"\n%%EOF\n"
 
     return bytes(out)
+
+
+
+class FakeEmbedder:
+    """Deterministic vectors from a hash: no model, no download, no network."""
+
+    def __init__(self, dimensions: int = 8) -> None:
+        self._dimensions = dimensions
+
+    @property
+    def model_id(self) -> str:
+        return "fake"
+
+    @property
+    def dimensions(self) -> int:
+        return self._dimensions
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return [self._vector(text) for text in texts]
+
+    def embed_query(self, text: str) -> list[float]:
+        return self._vector(text)
+
+    def _vector(self, text: str) -> list[float]:
+        digest = hashlib.shake_256(text.encode()).digest(self._dimensions)
+        raw = [byte / 255 for byte in digest]
+        length = math.sqrt(sum(value * value for value in raw)) or 1.0
+        return [value / length for value in raw]
+
