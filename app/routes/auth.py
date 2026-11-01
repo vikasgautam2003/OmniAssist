@@ -4,7 +4,7 @@ from fastapi import APIRouter, HTTPException, status
 
 from app.repositories.base import EmailAlreadyExistsError, UserRepository
 from app.repositories.postgres import PostgresUserRepository
-from app.routes.deps import CurrentUser
+from app.routes.deps import CurrentUser, get_organisation_repository
 from app.schemas.auth import (
     LoginRequest,
     MeResponse,
@@ -49,6 +49,13 @@ def signup(credentials: SignupRequest) -> TokenResponse:
         raise HTTPException(
             status.HTTP_409_CONFLICT, "An account with that email already exists"
         ) from None
+
+    # Every account gets an organisation it owns. Without one the very next
+    # request has no tenant, and the alternative -- a shared default tenant --
+    # is a boundary with a hole in it.
+    get_organisation_repository().create_with_owner(
+        f"{credentials.email.split('@')[0]} workspace", user.id
+    )
 
     return TokenResponse(access_token=create_access_token(str(user.id)))
 

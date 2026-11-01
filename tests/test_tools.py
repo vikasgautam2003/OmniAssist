@@ -3,7 +3,7 @@ from typing import Any
 
 import pytest
 
-from app.domain import ToolCall
+from app.domain import Scope, ToolCall
 from app.tools.base import ToolContext, ToolError
 from app.tools.calculator import Calculator
 from app.tools.registry import ToolRegistry
@@ -14,7 +14,7 @@ def registry() -> ToolRegistry:
     return ToolRegistry([Calculator()])
 
 
-CONTEXT = ToolContext(user_id=uuid.uuid4())
+CONTEXT = ToolContext(scope=Scope(organisation_id=uuid.uuid4(), user_id=uuid.uuid4()))
 
 
 def call(name: str, arguments: str) -> ToolCall:

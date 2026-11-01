@@ -10,6 +10,7 @@ from app.routes.artifacts import router as artifacts_router
 from app.routes.auth import router as auth_router
 from app.routes.chat import router
 from app.routes.documents import router as documents_router
+from app.routes.organisations import router as organisations_router
 
 
 @asynccontextmanager
@@ -32,6 +33,7 @@ app.include_router(auth_router)
 app.include_router(router)
 app.include_router(documents_router)
 app.include_router(artifacts_router)
+app.include_router(organisations_router)
 
 
 @app.get("/healthz")

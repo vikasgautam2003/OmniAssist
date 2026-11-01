@@ -9,7 +9,7 @@ from app.config import get_settings
 from app.jobs.celery_app import celery_app
 from app.jobs.indexing import index_uploaded_document_task
 from app.repositories.postgres import PostgresChunkRepository
-from app.routes.deps import CurrentUser
+from app.routes.deps import CurrentPrincipal
 
 router = APIRouter()
 
@@ -33,7 +33,7 @@ class JobStatus(BaseModel):
 
 
 @router.post("/documents", status_code=status.HTTP_202_ACCEPTED)
-async def upload(user: CurrentUser, file: UploadFile) -> UploadAccepted:
+async def upload(principal: CurrentPrincipal, file: UploadFile) -> UploadAccepted:
     """Accept an upload and queue it for indexing.
 
     202, not 201: the work has not happened yet. Indexing a long PDF embeds
@@ -64,15 +64,18 @@ async def upload(user: CurrentUser, file: UploadFile) -> UploadAccepted:
     # through the broker would make Redis a file store, which it is not: its
     # payloads are held in memory and it has no durability guarantee worth
     # betting a user's upload on.
-    artifact_id = get_artifacts().save(user.id, name, PDF_MEDIA_TYPE, data)
+    scope = principal.scope()
+    artifact_id = get_artifacts().save(scope, name, PDF_MEDIA_TYPE, data)
 
-    task = index_uploaded_document_task.delay(str(user.id), str(artifact_id))
+    task = index_uploaded_document_task.delay(
+        str(scope.organisation_id), str(scope.user_id), str(artifact_id)
+    )
 
     return UploadAccepted(job_id=task.id, document_name=name)
 
 
 @router.get("/documents/jobs/{job_id}")
-def job_status(job_id: str, user: CurrentUser) -> JobStatus:
+def job_status(job_id: str, principal: CurrentPrincipal) -> JobStatus:
     """Report on a queued indexing job.
 
     Celery states: PENDING, STARTED, SUCCESS, FAILURE. PENDING also means
@@ -90,5 +93,5 @@ def job_status(job_id: str, user: CurrentUser) -> JobStatus:
 
 
 @router.get("/documents")
-def list_documents(user: CurrentUser) -> list[str]:
-    return PostgresChunkRepository().list_documents(user.id)
+def list_documents(principal: CurrentPrincipal) -> list[str]:
+    return PostgresChunkRepository().list_documents(principal.scope())

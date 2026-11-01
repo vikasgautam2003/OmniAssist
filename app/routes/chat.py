@@ -15,7 +15,7 @@ from app.repositories.postgres import (
     PostgresChunkRepository,
     PostgresConversationRepository,
 )
-from app.routes.deps import CurrentUser
+from app.routes.deps import CurrentPrincipal
 from app.services.chat import ChatService
 from app.services.retrieval import Retriever
 from app.tools.calculator import Calculator
@@ -69,11 +69,11 @@ def _to_sse(chunks: Iterator[str]) -> Iterator[str]:
 
 @router.post("/chat/{conversation_id}")
 def chat(
-    conversation_id: str, request: ChatRequest, user: CurrentUser
+    conversation_id: str, request: ChatRequest, principal: CurrentPrincipal
 ) -> StreamingResponse:
     try:
         stream = get_chat_service().stream_reply(
-            conversation_id, user.id, request.message
+            conversation_id, principal.scope(), request.message
         )
     except ConversationNotFoundError as exc:
         # 404 rather than 403: telling the caller that a conversation exists

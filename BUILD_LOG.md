@@ -14,7 +14,7 @@
 | **v0.1** | Streaming chatbot with history | ✅ **shipped** |
 | **v0.2** | Postgres, auth, PDF upload + RAG, pytest | ✅ **shipped** `v0.2` |
 | **v0.3** | Tool-use framework, Celery jobs, structured logging | ✅ **feature-complete** |
-| v0.4 | Multi-tenancy, RBAC, Docker, AWS deploy, CD | ⬜ |
+| v0.4 | Multi-tenancy, RBAC, Docker, AWS deploy, CD | 🔄 Block 1 done |
 | v1.0 | Monitoring, alerting, LLM evals, load testing, cost tracking | ⬜ |
 
 ### v0.1 blocks
@@ -684,6 +684,65 @@ rather than threaded through every signature.
 **Verify**
 ```bash
 uv run pytest           # 110 tests, green with no key, no database, no Redis
+```
+
+---
+
+## 🔄 v0.4 — Multi-tenancy and deployment
+
+**Design:** `DESIGN_v0.4.md`, written before any code.
+
+**Why this order.** Block 1 first because it touches every table and every
+query — anything built before it gets revised after. The tools next, because
+web search is the first *dangerous* tool and needs its own review. The React
+front end **third, not first**: it is the most visible block and the most
+tempting to start with, which is exactly why it waits, because a UI written
+against a single-user API gets built twice. Docker fourth (nothing to package
+until the above works), AWS last (the only step that cannot be verified
+locally).
+
+| # | Block | Status |
+|---|-------|--------|
+| 1 | Multi-tenancy + RBAC | ✅ |
+| 2 | Web search + image generation tools | ⬜ |
+| 3 | React front end | ⬜ |
+| 4 | Docker | ⬜ |
+| 5 | AWS + CD | ⬜ |
+
+### Block 1 — multi-tenancy and RBAC ✅
+
+**Files**
+
+| File | Purpose |
+|---|---|
+| `app/domain.py` | `Role`, `Organisation`, `Membership`, `Principal`, **`Scope`** |
+| `app/db/models.py` | `organisations`, `memberships`, `organisation_id` on three tables |
+| `migrations/…005a57e99cd0` | create, **backfill**, then `NOT NULL` |
+| `app/repositories/organisations.py` | real implementation |
+| `app/repositories/memory_organisations.py` | the test double |
+| `app/routes/deps.py` | `CurrentPrincipal`, `CanManageMembers` |
+| `app/routes/organisations.py` | roster and member management |
+
+**Key points**
+- **`Scope` carries the boundary** — one dataclass instead of two more
+  parameters on ~20 methods, and it deliberately holds no role
+- **Isolation in the query, authorisation in the route.** Forgetting isolation
+  is a data breach; authorisation is about the action, and the route names it
+- **Documents are shared across an organisation, conversations are not**
+- The migration **creates an organisation per existing user, backfills, then
+  sets NOT NULL**. In production that is three deploys; one is safe here only
+  because no old code is running
+- Verified: 14 organisations, 112 rows backfilled, **none left untenanted**
+
+**Two things found by running it, not by testing it**
+1. Signup's personal workspace made every invitation impossible — one-org-per-
+   user and auto-create cannot both hold (C107)
+2. The previous block's artifact fix had **never reached `main`**: `git push -q`
+   hid the confirmation and the pull request merged the commit before it (C110)
+
+**Verify**
+```bash
+uv run pytest        # 126 tests, green with no key, no database, no Redis
 ```
 
 ---

@@ -2,6 +2,7 @@ import uuid
 
 import pytest
 
+from app.domain import Scope
 from app.jobs import indexing
 
 
@@ -15,13 +16,13 @@ def stored(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
         content = b"%PDF-fake"
 
     class FakeStore:
-        def get(self, user_id: uuid.UUID, artifact_id: uuid.UUID) -> object | None:
+        def get(self, scope: Scope, artifact_id: uuid.UUID) -> object | None:
             return FakeArtifact() if state.get("exists", True) else None
 
     class FakeIndexer:
         def __init__(self, *args: object, **kwargs: object) -> None: ...
 
-        def index(self, user_id: uuid.UUID, name: str, data: bytes) -> int:
+        def index(self, scope: Scope, name: str, data: bytes) -> int:
             if state.get("raise"):
                 raise indexing.PdfExtractionError("No text could be extracted.")
             state["indexed"] = name
@@ -41,7 +42,9 @@ def stored(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
 
 
 def test_a_queued_document_is_indexed(stored: dict[str, object]) -> None:
-    result = indexing.index_uploaded_document(uuid.uuid4(), uuid.uuid4())
+    result = indexing.index_uploaded_document(
+        Scope(organisation_id=uuid.uuid4(), user_id=uuid.uuid4()), uuid.uuid4()
+    )
 
     assert result == {"status": "done", "document_name": "policy.pdf", "passages": 7}
 
@@ -50,7 +53,9 @@ def test_a_bad_pdf_is_reported_not_retried(stored: dict[str, object]) -> None:
     """Retrying cannot help a scanned document, and the message says why."""
     stored["raise"] = True
 
-    result = indexing.index_uploaded_document(uuid.uuid4(), uuid.uuid4())
+    result = indexing.index_uploaded_document(
+        Scope(organisation_id=uuid.uuid4(), user_id=uuid.uuid4()), uuid.uuid4()
+    )
 
     assert result["status"] == "failed"
     assert "No text" in str(result["error"])
@@ -61,7 +66,9 @@ def test_the_job_checks_ownership_too(stored: dict[str, object]) -> None:
     any more than a request does."""
     stored["exists"] = False
 
-    result = indexing.index_uploaded_document(uuid.uuid4(), uuid.uuid4())
+    result = indexing.index_uploaded_document(
+        Scope(organisation_id=uuid.uuid4(), user_id=uuid.uuid4()), uuid.uuid4()
+    )
 
     assert result["status"] == "failed"
     assert "not be found" in str(result["error"])

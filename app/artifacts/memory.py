@@ -1,18 +1,18 @@
 import uuid
 
-from app.domain import Artifact
+from app.domain import Artifact, Scope
 
 
 class InMemoryArtifactStore:
     def __init__(self) -> None:
-        self._rows: dict[uuid.UUID, tuple[uuid.UUID, Artifact]] = {}
+        self._rows: dict[uuid.UUID, tuple[tuple[uuid.UUID, uuid.UUID], Artifact]] = {}
 
     def save(
-        self, user_id: uuid.UUID, filename: str, media_type: str, content: bytes
+        self, scope: Scope, filename: str, media_type: str, content: bytes
     ) -> uuid.UUID:
         artifact_id = uuid.uuid4()
         self._rows[artifact_id] = (
-            user_id,
+            (scope.organisation_id, scope.user_id),
             Artifact(
                 id=artifact_id,
                 filename=filename,
@@ -22,10 +22,10 @@ class InMemoryArtifactStore:
         )
         return artifact_id
 
-    def get(self, user_id: uuid.UUID, artifact_id: uuid.UUID) -> Artifact | None:
+    def get(self, scope: Scope, artifact_id: uuid.UUID) -> Artifact | None:
         found = self._rows.get(artifact_id)
 
-        if found is None or found[0] != user_id:
+        if found is None or found[0] != (scope.organisation_id, scope.user_id):
             return None
 
         return found[1]

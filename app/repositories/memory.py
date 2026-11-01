@@ -1,24 +1,24 @@
 import math
 import uuid
 
-from app.domain import Chunk, Message, User, Vector
+from app.domain import Chunk, Message, Scope, User, Vector
 from app.repositories.base import ConversationNotFoundError, EmailAlreadyExistsError
 
 
 class InMemoryConversationRepository:
     def __init__(self) -> None:
         self._store: dict[str, list[Message]] = {}
-        self._owners: dict[str, uuid.UUID] = {}
+        self._owners: dict[str, tuple[uuid.UUID, uuid.UUID]] = {}
 
     def get_history(
         self,
         conversation_id: str,
-        user_id: uuid.UUID,
+        scope: Scope,
         limit: int | None = None,
     ) -> list[Message]:
         # Another user's conversation is indistinguishable from one that does
         # not exist: confirming existence would let ids be enumerated.
-        if self._owners.get(conversation_id) != user_id:
+        if self._owners.get(conversation_id) != (scope.organisation_id, scope.user_id):
             return []
 
         history = self._store.get(conversation_id, [])
@@ -28,12 +28,11 @@ class InMemoryConversationRepository:
 
         return list(history[-limit:])
 
-    def add_message(
-        self, conversation_id: str, user_id: uuid.UUID, message: Message
-    ) -> None:
-        owner = self._owners.setdefault(conversation_id, user_id)
+    def add_message(self, conversation_id: str, scope: Scope, message: Message) -> None:
+        key = (scope.organisation_id, scope.user_id)
+        owner = self._owners.setdefault(conversation_id, key)
 
-        if owner != user_id:
+        if owner != key:
             raise ConversationNotFoundError(conversation_id)
 
         self._store.setdefault(conversation_id, []).append(message)
@@ -82,7 +81,7 @@ class InMemoryChunkRepository:
 
     def add(
         self,
-        user_id: uuid.UUID,
+        scope: Scope,
         document_name: str,
         chunks: list[str],
         vectors: list[Vector],
@@ -98,22 +97,27 @@ class InMemoryChunkRepository:
             chunk = Chunk(
                 content=content, document_name=document_name, chunk_index=index
             )
-            self._rows.append((user_id, chunk, vector))
+            self._rows.append((scope.organisation_id, chunk, vector))
 
-    def search(self, user_id: uuid.UUID, vector: Vector, limit: int) -> list[Chunk]:
-        owned = [row for row in self._rows if row[0] == user_id]
+    def search(self, scope: Scope, vector: Vector, limit: int) -> list[Chunk]:
+        owned = [row for row in self._rows if row[0] == scope.organisation_id]
         ranked = sorted(owned, key=lambda row: cosine_distance(vector, row[2]))
         return [chunk for _, chunk, _ in ranked[:limit]]
 
-    def delete_document(self, user_id: uuid.UUID, document_name: str) -> None:
+    def delete_document(self, scope: Scope, document_name: str) -> None:
         self._rows = [
             row
             for row in self._rows
-            if not (row[0] == user_id and row[1].document_name == document_name)
+            if not (
+                row[0] == scope.organisation_id
+                and row[1].document_name == document_name
+            )
         ]
 
-    def list_documents(self, user_id: uuid.UUID) -> list[str]:
+    def list_documents(self, scope: Scope) -> list[str]:
         names = {
-            chunk.document_name for owner, chunk, _ in self._rows if owner == user_id
+            chunk.document_name
+            for owner, chunk, _ in self._rows
+            if owner == scope.organisation_id
         }
         return sorted(names)

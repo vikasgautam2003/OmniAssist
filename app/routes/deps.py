@@ -5,8 +5,9 @@ import jwt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from app.domain import User
-from app.repositories.base import UserRepository
+from app.domain import Principal, User
+from app.repositories.base import OrganisationRepository, UserRepository
+from app.repositories.organisations import PostgresOrganisationRepository
 from app.repositories.postgres import PostgresUserRepository
 from app.security.tokens import decode_access_token
 
@@ -19,6 +20,10 @@ _UNAUTHENTICATED = "Not authenticated"
 
 def get_user_repository() -> UserRepository:
     return PostgresUserRepository()
+
+
+def get_organisation_repository() -> OrganisationRepository:
+    return PostgresOrganisationRepository()
 
 
 def _unauthenticated() -> HTTPException:
@@ -65,3 +70,45 @@ def get_current_user(
 
 
 CurrentUser = Annotated[User, Depends(get_current_user)]
+
+
+def get_principal(user: "CurrentUser") -> Principal:
+    """Resolve the caller to a user, an organisation and a role.
+
+    The organisation comes from the membership, never from a request
+    parameter. A parameter can be forged, and tenancy is the one boundary
+    that must not be.
+    """
+    membership = get_organisation_repository().membership_for(user.id)
+
+    if membership is None:
+        # Signup always creates one, so this means the data is inconsistent.
+        # Failing is correct: a default tenant is a boundary with a hole in it.
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, "You do not belong to an organisation."
+        )
+
+    organisation, role = membership
+    return Principal(user=user, organisation=organisation, role=role)
+
+
+CurrentPrincipal = Annotated[Principal, Depends(get_principal)]
+
+
+def require_member_management(principal: "CurrentPrincipal") -> Principal:
+    """Authorisation, deliberately at the route rather than the repository.
+
+    Isolation -- can this organisation see this row -- stays in the query,
+    because forgetting it is a data breach. Authorisation is about the
+    *action*, and the route is where the action is named.
+    """
+    if not principal.role.can_manage_members():
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            f"A {principal.role.value} cannot manage members.",
+        )
+
+    return principal
+
+
+CanManageMembers = Annotated[Principal, Depends(require_member_management)]

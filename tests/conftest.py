@@ -3,6 +3,7 @@ from collections.abc import Callable
 
 import pytest
 
+from app.domain import Scope
 from app.repositories.memory import InMemoryConversationRepository
 from app.services.chat import ChatService
 from app.services.retrieval import Retriever
@@ -20,6 +21,28 @@ def user_id() -> uuid.UUID:
 @pytest.fixture
 def other_user_id() -> uuid.UUID:
     return uuid.uuid4()
+
+
+@pytest.fixture
+def organisation_id() -> uuid.UUID:
+    return uuid.uuid4()
+
+
+@pytest.fixture
+def scope(organisation_id: uuid.UUID, user_id: uuid.UUID) -> Scope:
+    return Scope(organisation_id=organisation_id, user_id=user_id)
+
+
+@pytest.fixture
+def other_scope(other_user_id: uuid.UUID) -> Scope:
+    """A different user in a different organisation -- the case that matters."""
+    return Scope(organisation_id=uuid.uuid4(), user_id=other_user_id)
+
+
+@pytest.fixture
+def colleague_scope(organisation_id: uuid.UUID, other_user_id: uuid.UUID) -> Scope:
+    """A different user in the *same* organisation: shares documents, not chats."""
+    return Scope(organisation_id=organisation_id, user_id=other_user_id)
 
 
 @pytest.fixture

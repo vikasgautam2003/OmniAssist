@@ -1,8 +1,7 @@
-import uuid
 from collections.abc import Generator, Iterator, Sequence
 
 from app.clients.base import LLMClient
-from app.domain import Chunk, Message, ToolCall
+from app.domain import Chunk, Message, Scope, ToolCall
 from app.repositories.base import ConversationRepository
 from app.services.retrieval import Retriever
 from app.tools.base import ToolContext, ToolSpec
@@ -46,7 +45,7 @@ class ChatService:
         self._max_tool_iterations = max_tool_iterations
 
     def stream_reply(
-        self, conversation_id: str, user_id: uuid.UUID, user_message: str
+        self, conversation_id: str, scope: Scope, user_message: str
     ) -> Iterator[str]:
         """Record the user's message and return a stream of the reply.
 
@@ -57,22 +56,22 @@ class ChatService:
         """
         self._repository.add_message(
             conversation_id,
-            user_id,
+            scope,
             Message(role="user", content=user_message),
         )
 
         trimmed = self._repository.get_history(
             conversation_id,
-            user_id,
+            scope,
             limit=self._max_history,
         )
 
         return self._stream(
-            conversation_id, user_id, self._ground(user_id, user_message, trimmed)
+            conversation_id, scope, self._ground(scope, user_message, trimmed)
         )
 
     def _ground(
-        self, user_id: uuid.UUID, question: str, history: list[Message]
+        self, scope: Scope, question: str, history: list[Message]
     ) -> list[Message]:
         """Prepend retrieved passages to this one model call.
 
@@ -87,7 +86,7 @@ class ChatService:
         if self._retriever is None:
             return history
 
-        chunks = self._retriever.find(user_id, question)
+        chunks = self._retriever.find(scope, question)
 
         if not chunks:
             return history
@@ -99,7 +98,7 @@ class ChatService:
         return [grounding, *history]
 
     def _stream(
-        self, conversation_id: str, user_id: uuid.UUID, trimmed: list[Message]
+        self, conversation_id: str, scope: Scope, trimmed: list[Message]
     ) -> Iterator[str]:
         """Stream the reply, running any tools the model asks for.
 
@@ -112,7 +111,7 @@ class ChatService:
 
         for _ in range(self._max_tool_iterations):
             assistant, calls = yield from self._turn(
-                conversation_id, user_id, working, catalogue
+                conversation_id, scope, working, catalogue
             )
             working.append(assistant)
 
@@ -124,21 +123,21 @@ class ChatService:
                 # model can read and recover from, not a 500 for the user.
                 result = Message(
                     role="tool",
-                    content=self._tools.run(call, ToolContext(user_id=user_id)),
+                    content=self._tools.run(call, ToolContext(scope=scope)),
                     tool_call_id=call.id,
                 )
-                self._repository.add_message(conversation_id, user_id, result)
+                self._repository.add_message(conversation_id, scope, result)
                 working.append(result)
 
         # Out of iterations. Tell the model to stop and answer, so the user
         # gets a reply rather than a request that simply dies.
         working.append(Message(role="system", content=NO_MORE_TOOLS))
-        yield from self._turn(conversation_id, user_id, working, ())
+        yield from self._turn(conversation_id, scope, working, ())
 
     def _turn(
         self,
         conversation_id: str,
-        user_id: uuid.UUID,
+        scope: Scope,
         working: list[Message],
         catalogue: Sequence[ToolSpec],
     ) -> Generator[str, None, tuple[Message, tuple[ToolCall, ...]]]:
@@ -155,8 +154,8 @@ class ChatService:
                 calls = event.tool_calls
 
         assistant = Message(role="assistant", content="".join(pieces), tool_calls=calls)
-        self._repository.add_message(conversation_id, user_id, assistant)
+        self._repository.add_message(conversation_id, scope, assistant)
         return assistant, calls
 
-    def get_history(self, conversation_id: str, user_id: uuid.UUID) -> list[Message]:
-        return self._repository.get_history(conversation_id, user_id)
+    def get_history(self, conversation_id: str, scope: Scope) -> list[Message]:
+        return self._repository.get_history(conversation_id, scope)

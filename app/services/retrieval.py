@@ -1,6 +1,4 @@
-import uuid
-
-from app.domain import Chunk
+from app.domain import Chunk, Scope
 from app.embeddings.base import Embedder
 from app.repositories.base import ChunkRepository
 
@@ -19,12 +17,12 @@ class Retriever:
         self._chunks = chunks
         self._top_k = top_k
 
-    def find(self, user_id: uuid.UUID, question: str) -> list[Chunk]:
+    def find(self, scope: Scope, question: str) -> list[Chunk]:
         if not question.strip():
             return []
 
         vector = self._embedder.embed_query(question)
 
-        # user_id reaches the WHERE clause: retrieval that is not scoped
-        # answers one person's question from another person's documents.
-        return self._chunks.search(user_id, vector, limit=self._top_k)
+        # The scope reaches the WHERE clause: retrieval that is not scoped
+        # answers one tenant's question from another tenant's documents.
+        return self._chunks.search(scope, vector, limit=self._top_k)

@@ -3,6 +3,7 @@ import uuid
 
 from app.artifacts.postgres import PostgresArtifactStore
 from app.config import get_settings
+from app.domain import Scope
 from app.embeddings.factory import get_embedder
 from app.jobs.celery_app import celery_app
 from app.observability.logging import get_logger, new_request
@@ -13,9 +14,7 @@ from app.services.pdf import PdfExtractionError
 logger = get_logger("jobs")
 
 
-def index_uploaded_document(
-    user_id: uuid.UUID, artifact_id: uuid.UUID
-) -> dict[str, object]:
+def index_uploaded_document(scope: Scope, artifact_id: uuid.UUID) -> dict[str, object]:
     """Index a previously stored upload. Plain function on purpose.
 
     The Celery task below is a thin wrapper around this, so the work can be
@@ -23,10 +22,10 @@ def index_uploaded_document(
     """
     # A job has no HTTP request to inherit a correlation id from, so it
     # starts its own scope -- otherwise its lines float free of any context.
-    new_request(user_id)
+    new_request(scope.user_id)
     started = time.perf_counter()
 
-    artifact = PostgresArtifactStore().get(user_id, artifact_id)
+    artifact = PostgresArtifactStore().get(scope, artifact_id)
 
     if artifact is None:
         # Ownership is checked here too: the task arguments travel through a
@@ -45,7 +44,7 @@ def index_uploaded_document(
     )
 
     try:
-        passages = indexer.index(user_id, artifact.filename, artifact.content)
+        passages = indexer.index(scope, artifact.filename, artifact.content)
     except PdfExtractionError as exc:
         # A bad PDF is the user's problem to fix and the message says how, so
         # it is carried back rather than retried: retrying cannot help.
@@ -73,5 +72,10 @@ def index_uploaded_document(
 
 
 @celery_app.task(name="index_uploaded_document")
-def index_uploaded_document_task(user_id: str, artifact_id: str) -> dict[str, object]:
-    return index_uploaded_document(uuid.UUID(user_id), uuid.UUID(artifact_id))
+def index_uploaded_document_task(
+    organisation_id: str, user_id: str, artifact_id: str
+) -> dict[str, object]:
+    scope = Scope(
+        organisation_id=uuid.UUID(organisation_id), user_id=uuid.UUID(user_id)
+    )
+    return index_uploaded_document(scope, uuid.UUID(artifact_id))
