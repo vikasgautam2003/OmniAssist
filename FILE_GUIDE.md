@@ -310,7 +310,8 @@ application interface and must stay in step with it.
 
 **Contains**
 
-- `Tool` — the protocol: `name`, `description`, `parameters`, `run(**kwargs)`
+- `Tool` — the protocol: `name`, `description`, `parameters`, `run(context, **kwargs)`
+- `ToolContext` — who the model acts for; passed by the service, never composed by the model
 - `ToolSpec` — what the model is told about a tool, vendor-neutral
 - `ToolError` — a recoverable failure, written for a reader
 
@@ -356,6 +357,79 @@ because blacklisting dangerous strings fails against an unbounded set.
 **Fits** — pure by design. The first tools have no side effects because a tool
 catalogue turns prompt injection from something the model *says* into something
 it *does*.
+
+### `app/artifacts/base.py`, `postgres.py`, `memory.py`
+**Is** — the `ArtifactStore` protocol and its two implementations.
+
+**Contains**
+
+- `ArtifactStore` — `save()` and `get()`
+- `PostgresArtifactStore` — rows in the `artifacts` table, **ownership in the query**
+- `InMemoryArtifactStore` — the test double
+
+**Why** — tools return a string, so a generated file cannot be a return value.
+It is stored here and the tool returns a reference. PostgreSQL rather than disk
+because a container filesystem is ephemeral and bytes in a column cannot be
+path-traversed; the protocol makes object storage a one-file change later.
+
+### `app/tools/artifacts.py`
+**Is** — the helpers all three generator tools share.
+
+**Contains**
+
+- `safe_filename()` — whitelists a model-composed title; strips an extension it already has
+- `store()` — saves the bytes and returns the one-line reference the model sees
+- `rows_from()` — validates and normalises a table the model composed
+
+**Why** — the filename reaches a `Content-Disposition` header, where a newline
+is header injection and `../` would be path traversal. Whitelisting beats
+blacklisting for the same reason as the calculator's AST.
+
+### `app/tools/documents.py`
+**Is** — `create_document`: writes a PDF.
+
+**Contains**
+
+- `CreateDocument` — the four protocol members
+- `_latin1()` — fpdf's core fonts are latin-1, and models emit em dashes constantly
+
+**Why** — the first tool with a side effect, bounded on purpose: it writes only
+to our own store, only for the calling user, and takes no path and no URL.
+
+### `app/tools/spreadsheets.py`
+**Is** — `create_spreadsheet`: writes an .xlsx.
+
+**Contains**
+
+- `CreateSpreadsheet` — the four protocol members
+- `_as_text()` — prefixes `=`, `+`, `-`, `@` so a cell is never a formula
+
+**Why** — a spreadsheet formula is executable, and a model composing a cell
+from document text can produce one by accident.
+
+### `app/tools/charts.py`
+**Is** — `create_chart`: draws a bar, line or pie chart as PNG.
+
+**Contains**
+
+- `CreateChart` — the four protocol members
+- `KINDS`, `MAX_POINTS` — what is allowed and how much
+- `_as_number()` — rejects values that are not numeric
+
+**Why** — `matplotlib.use("Agg")` runs before pyplot is imported, because the
+default backend wants a window system a server does not have. Figures are closed
+in a `finally`: pyplot holds every figure until closed, so a server drawing
+charts all day leaks until it dies.
+
+### `app/routes/artifacts.py`
+**Is** — `GET /artifacts/{id}`: downloads a generated file.
+
+**Contains**
+
+- `download()` — returns the bytes with a `Content-Disposition` attachment header
+
+**Why** — ownership is in the query and a miss returns **404**, because a
+download URL is guessable in principle and must not be enough on its own.
 
 ### `app/services/chat.py`
 **Is** — `ChatService`: loads history, calls the model, streams the reply,
@@ -763,5 +837,5 @@ This document.
 
 ---
 
-*Updated through v0.3 Block 1 (tool-use framework). Revise when
+*Updated through v0.3 Blocks 1–4 (framework and three generator tools). Revise when
 files are added, removed, or change purpose.*

@@ -2,7 +2,7 @@ import json
 from collections.abc import Iterator, Sequence
 
 from app.domain import ToolCall
-from app.tools.base import Tool, ToolError, ToolSpec
+from app.tools.base import Tool, ToolContext, ToolError, ToolSpec
 
 
 class ToolRegistry:
@@ -27,7 +27,7 @@ class ToolRegistry:
             for tool in self._tools.values()
         ]
 
-    def run(self, call: ToolCall) -> str:
+    def run(self, call: ToolCall, context: ToolContext) -> str:
         """Run one tool call and return what the model should see.
 
         Never raises. Every failure becomes text fed back to the model, which
@@ -50,7 +50,7 @@ class ToolRegistry:
             return f"The arguments for {call.name!r} must be a JSON object."
 
         try:
-            return tool.run(**arguments)
+            return tool.run(context, **arguments)
         except ToolError as exc:
             return f"{call.name} failed: {exc}"
         except TypeError as exc:

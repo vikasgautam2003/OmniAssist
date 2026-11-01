@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from app.artifacts.postgres import PostgresArtifactStore
 from app.clients.factory import get_llm_client
 from app.config import get_settings
 from app.embeddings.factory import get_embedder
@@ -18,7 +19,10 @@ from app.routes.deps import CurrentUser
 from app.services.chat import ChatService
 from app.services.retrieval import Retriever
 from app.tools.calculator import Calculator
+from app.tools.charts import CreateChart
+from app.tools.documents import CreateDocument
 from app.tools.registry import ToolRegistry
+from app.tools.spreadsheets import CreateSpreadsheet
 
 router = APIRouter()
 
@@ -36,11 +40,19 @@ def get_chat_service() -> ChatService:
         top_k=get_settings().retrieval_top_k,
     )
     settings = get_settings()
+    artifacts = PostgresArtifactStore()
     return ChatService(
         get_llm_client(),
         PostgresConversationRepository(),
         retriever=retriever,
-        tools=ToolRegistry([Calculator()]),
+        tools=ToolRegistry(
+            [
+                Calculator(),
+                CreateDocument(artifacts),
+                CreateSpreadsheet(artifacts),
+                CreateChart(artifacts),
+            ]
+        ),
         max_tool_iterations=settings.max_tool_iterations,
     )
 

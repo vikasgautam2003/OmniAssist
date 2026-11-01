@@ -5,7 +5,7 @@ from app.clients.base import LLMClient
 from app.domain import Chunk, Message, ToolCall
 from app.repositories.base import ConversationRepository
 from app.services.retrieval import Retriever
-from app.tools.base import ToolSpec
+from app.tools.base import ToolContext, ToolSpec
 from app.tools.registry import ToolRegistry
 
 NO_MORE_TOOLS = (
@@ -124,7 +124,7 @@ class ChatService:
                 # model can read and recover from, not a 500 for the user.
                 result = Message(
                     role="tool",
-                    content=self._tools.run(call),
+                    content=self._tools.run(call, ToolContext(user_id=user_id)),
                     tool_call_id=call.id,
                 )
                 self._repository.add_message(conversation_id, user_id, result)

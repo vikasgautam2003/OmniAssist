@@ -1,3 +1,4 @@
+import uuid
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -9,6 +10,18 @@ class ToolError(Exception):
     correct itself or explain, rather than failing the whole request. It is
     therefore written for a reader, and never carries internal detail.
     """
+
+
+@dataclass(frozen=True)
+class ToolContext:
+    """Who the model is acting for.
+
+    Passed by the service, never by the model. A tool that writes anything must
+    scope it to a user, and the model is an untrusted caller -- so identity
+    cannot be one of the arguments it composes.
+    """
+
+    user_id: uuid.UUID
 
 
 @dataclass(frozen=True)
@@ -43,4 +56,4 @@ class Tool(Protocol):
         """JSON Schema. Constrains the shape of arguments, never their meaning."""
         ...
 
-    def run(self, **kwargs: Any) -> str: ...
+    def run(self, context: ToolContext, **kwargs: Any) -> str: ...

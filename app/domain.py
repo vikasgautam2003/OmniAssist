@@ -51,3 +51,19 @@ class Chunk:
     content: str
     document_name: str
     chunk_index: int
+
+
+@dataclass(frozen=True)
+class Artifact:
+    """A file a tool produced, owned by the user who asked for it.
+
+    Tools return a string, so a generated file cannot be the return value.
+    It is stored here and the tool returns a short reference the UI resolves
+    into a download -- keeping megabytes of base64 out of the conversation
+    and out of the model's context window.
+    """
+
+    id: uuid.UUID
+    filename: str
+    media_type: str
+    content: bytes

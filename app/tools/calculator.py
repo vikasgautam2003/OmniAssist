@@ -2,7 +2,7 @@ import ast
 import operator
 from typing import Any
 
-from app.tools.base import ToolError
+from app.tools.base import ToolContext, ToolError
 
 # Only these node types are evaluated. Anything else -- a name, a call, an
 # attribute, a subscript -- is rejected before it runs.
@@ -89,7 +89,7 @@ class Calculator:
             "required": ["expression"],
         }
 
-    def run(self, **kwargs: Any) -> str:
+    def run(self, context: ToolContext, **kwargs: Any) -> str:
         expression = kwargs.get("expression")
 
         if not isinstance(expression, str) or not expression.strip():

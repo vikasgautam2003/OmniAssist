@@ -487,9 +487,9 @@ be revised after every block.
 | # | Block | Status |
 |---|-------|--------|
 | 1 | Tool-use framework: `Tool` protocol, registry, bounded loop, `Message` refactor | ✅ |
-| 2 | Document generation (PDF) as a tool | ⬜ |
-| 3 | Spreadsheet generation (CSV / Excel) as a tool | ⬜ |
-| 4 | Charts and data analysis as a tool | ⬜ |
+| 2 | Document generation (PDF) as a tool | ✅ |
+| 3 | Spreadsheet generation (Excel) as a tool | ✅ |
+| 4 | Charts as a tool | ✅ |
 | 5 | Background jobs — Celery + Redis; moves indexing out of the request (D36) | ⬜ |
 | 6 | Structured logging — latency, tokens and cost per request | ⬜ |
 
@@ -542,6 +542,50 @@ uv run pytest                      # 79 tests
 # live: the model calls the tool and uses the result
 uv run python -c "..."             # 48271 * 9183 -> 443272593 ✓
 ```
+
+---
+
+### Blocks 2–4 — three generator tools ✅
+
+**Why together:** they exist to *prove* the framework's claim. If adding a
+capability is still expensive, Block 1 did not work. Built in one sitting, which
+is the evidence.
+
+**Why Block 2 carries the shared piece.** All three produce files, and a tool
+returns a string — so the artifact store had to exist before the first of them.
+Built once in Block 2; Blocks 3 and 4 reuse it unchanged.
+
+**Files**
+
+| File | Purpose |
+|---|---|
+| `app/artifacts/{base,postgres,memory}.py` | `ArtifactStore` protocol and implementations |
+| `app/db/models.py` | `ArtifactRow` + migration `409f9e6d475e` |
+| `app/tools/artifacts.py` | `safe_filename()`, `store()`, `rows_from()` — shared by all three |
+| `app/tools/documents.py` | `create_document` (fpdf2) |
+| `app/tools/spreadsheets.py` | `create_spreadsheet` (openpyxl) |
+| `app/tools/charts.py` | `create_chart` (matplotlib) |
+| `app/routes/artifacts.py` | `GET /artifacts/{id}`, scoped to the owner |
+| `app/tools/base.py` | `ToolContext` added to the protocol |
+
+**Key points**
+- **The bytes never enter the conversation.** Base64 would be re-sent to the
+  model every later turn — roughly 70k tokens for a 200 KB PDF it cannot read
+- **`ToolContext` is passed by the service, never by the model.** Identity
+  cannot be a JSON argument the model composes
+- Artifacts live in **PostgreSQL**: a container filesystem is ephemeral, and
+  bytes in a column cannot be path-traversed. S3 in v0.4 is one file
+- Three outputs, three injections: spreadsheet **formulas** (`=`), filename
+  **header injection**, PDF **latin-1** limits
+- `matplotlib.use("Agg")` before importing pyplot, and `plt.close()` in a
+  `finally` — pyplot holds every figure until closed
+
+**Verify**
+```bash
+uv run pytest                       # 97 tests
+```
+Live: one question produced a bar chart *and* a spreadsheet, the model choosing
+both tools in a single turn.
 
 ---
 

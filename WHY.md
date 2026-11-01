@@ -853,6 +853,72 @@ for something impossible"* into a 500 for a user who did nothing wrong.
 The line to hold: **a tool failing is ordinary and recoverable; the provider
 being unreachable is not.** `LLMError` still propagates.
 
+### Blocks 2–4 — proving the claim
+
+Block 1 asserted that capabilities would become cheap. Blocks 2–4 exist to test
+that, and the evidence is that all three — PDF, spreadsheet, chart — were built
+in one sitting.
+
+**But the first of them exposed something Block 1 had not needed.**
+
+#### A tool returns a reference, not a payload
+
+Tools return a string, so a generated PDF cannot be the return value. The
+obvious shortcut is base64, and it is a trap that compounds.
+
+Every tool result becomes a message, and the **whole conversation is sent to the
+model on every later turn**. A 200 KB PDF as base64 is roughly 70,000 tokens of
+noise the model cannot read, re-sent and re-paid for on every subsequent
+question, crowding out the retrieval context that is actually useful.
+
+So files go to an artifact store and the tool returns one line:
+`Created report.pdf (12 KB). Download it at /artifacts/f5b5d9af-…`
+
+**Why PostgreSQL and not disk.** A container filesystem is ephemeral, which
+matters for v0.4's deployment, and bytes in a column cannot be reached by a
+path-traversal bug. Object storage is the right answer once files get large —
+and behind `ArtifactStore`, that is a one-file change.
+
+#### Identity cannot be an argument the model writes
+
+The first side-effecting tool needs to know which user it acts for. The obvious
+route — put `user_id` in the tool's JSON Schema — is wrong, because **the model
+composes those arguments** and the model's input can come from an uploaded
+document. An injected instruction could claim to be someone else.
+
+So `ToolContext` is a separate parameter supplied by `ChatService`. Arguments
+are untrusted and schema-validated; context is trusted and never reaches the
+model.
+
+Worth noting it was **added when the need appeared**, not guessed at in Block 1.
+A pure calculator gave no reason to invent it, and inventing it early would have
+been speculative design.
+
+#### Every output format has an injection of its own
+
+Three tools, three escapes, none of them SQL:
+
+| Output | The hazard |
+|---|---|
+| **Spreadsheet** | openpyxl treats a leading `=` as a **formula**, and formulas execute. A model composing a cell from document text produces one by accident |
+| **Filename** | It reaches a `Content-Disposition` header, where a newline is **header injection** and `../` would be path traversal |
+| **PDF text** | fpdf's core fonts are **latin-1 only**, so an em dash — which models emit constantly — raises mid-render |
+
+**The pattern worth carrying: anything a model composes is untrusted input to
+whatever consumes it next, and every consumer has its own idea of what is
+special.**
+
+#### Two things matplotlib needs said out loud
+
+`matplotlib.use("Agg")` must run **before pyplot is imported**, because the
+default backend wants a window system a server does not have, and the import
+binds the backend.
+
+And pyplot keeps a reference to every figure, so they are never garbage
+collected. A server drawing charts all day leaks until it dies. There is a test
+asserting no figures remain after twelve charts — invisible until production
+otherwise.
+
 ---
 
 ## Part 4 — Every file, and what it is for

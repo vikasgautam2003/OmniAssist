@@ -23,6 +23,9 @@
 | **D10** | **v0.1 runs on Groq free tier — `llama-3.3-70b-versatile`** | Budget is $0. Groq = ~1,000 req/day, 30 RPM, **no credit card, ongoing**; Anthropic has no free tier. v0.1 needs ~200 requests total. ⚠️ **Groq ≠ Grok** — Groq is an inference provider serving open-weight models (free); Grok is xAI's model ($25 credits then paid). Config is provider-neutral: `LLM_PROVIDER` / `LLM_API_KEY` / `LLM_MODEL`. | Yes — that's the point of D8 |
 | **D11** | **Conversation history must be trimmed** (Block 4), not left unbounded | Groq's free tier caps ~**14,400 tokens/minute**. Per C10, a 40-turn conversation is ~40K tokens in *one* request — over the entire per-minute budget. **A limit that makes you build it right beats unlimited quota that lets you build it wrong.** | No |
 | **D13** | **Model switched to `openai/gpt-oss-120b`** on Groq | Changed by editing **one line of `.env`** — zero code changes. Live proof that D3 + D8 work. | Yes — one line |
+| **D47** | **Generated files are stored in PostgreSQL, not on disk** | A container filesystem is ephemeral, which matters for v0.4's deployment, and bytes in a column cannot be reached by a path-traversal bug. Object storage is the right answer once files are large; the `ArtifactStore` protocol makes that a one-file change. | Yes — S3 in v0.4 |
+| **D46** | **A tool returns a reference, never the file** | Returning base64 would put megabytes into the conversation, which is then re-sent to the model on every later turn — paying for tokens it cannot read, and filling the context window that retrieval needs. The tool returns one line naming the file and a download path. | No — this is the shape |
+| **D45** | **`ToolContext` is passed by the service, never composed by the model** | The first side-effecting tool needs to know which user it is acting for. Identity cannot be one of the JSON arguments the model writes, because the model is an untrusted caller and an injected instruction could then claim to be someone else. Added to the protocol when the need appeared rather than guessed at in Block 1. | No |
 | **D44** | **Streaming and tool detection happen in one pass — supersedes D40** | D40 said *run the loop non-streaming, then stream the answer*. Implementing it exposed a flaw: once the loop ends you already hold the final text, so you either regenerate it (double tokens, double latency) or fake-stream text in hand. Watching for tool-call deltas costs one accumulator keyed by index, and keeps genuine streaming including the preamble a model emits before calling a tool. | Yes |
 | **D43** | **Every block ends by updating all four documents in the same commit** | The documents are the deliverable, not a by-product: their purpose is answering *"you used AI, but do you know what you chose and why"*. Reconstructed later, the reasoning is already gone — the *why* fades first. `FILE_GUIDE.md` also carries each file's functions at a high level, because the likely interview question is "open this file and tell me what it does", not "recite line 40". | No — standing rule |
 | **D42** | **No tool with side effects in v0.3 Block 1** | D32's prompt injection was cosmetic while the model could only *speak*. A tool catalogue lets an injected instruction make it *act*, so the first tools compute and return — nothing writes, nothing takes a URL from the model. Web search in v0.4 is the first dangerous tool and gets its own review. | Yes, per tool |
@@ -991,6 +994,78 @@ constrains *shape*, never meaning: it can say "expression is a string", not
 "expression is arithmetic". A test that assumed a signature mismatch would be
 caught by the registry was wrong, and mypy caught the test.
 
+### C95 — A tool returns a reference, not a payload
+Tools return a string, so a generated PDF cannot be the return value. The
+tempting shortcut is base64 — and it is a trap that gets worse over time.
+
+Every tool result becomes a message in the conversation, and the whole
+conversation is sent to the model on **every later turn**. A 200 KB PDF encoded
+as base64 is roughly 70,000 tokens of noise the model cannot read, re-sent and
+re-paid for on each subsequent question, crowding out the retrieval context that
+is actually useful.
+
+So the file goes to an artifact store and the tool returns one line:
+
+```
+Created report.pdf (12 KB). Download it at /artifacts/f5b5d9af-...
+```
+
+**The general rule: when a tool produces something large, it returns where to
+find it, not the thing itself.**
+
+### C96 — Identity is passed by the system, never composed by the model
+The first side-effecting tool has to know which user it is acting for. The
+obvious route — add `user_id` to the tool's JSON Schema — is wrong, because
+**the model writes those arguments**, and the model's input can come from an
+uploaded document. An injected instruction could then claim to be someone else.
+
+`ToolContext` is therefore a separate parameter supplied by `ChatService`:
+
+```python
+def run(self, context: ToolContext, **kwargs: Any) -> str: ...
+```
+
+Arguments are untrusted and schema-validated; context is trusted and never
+reaches the model. Worth noting that this was **added when the need appeared**,
+not guessed at in Block 1 — a pure calculator gave no reason to invent it, and
+inventing it early would have been speculative.
+
+### C97 — Every output format has an injection of its own
+Three generator tools, three different escapes — and none of them is about SQL.
+
+**Spreadsheets.** openpyxl treats a leading `=` as a formula, and a spreadsheet
+formula is executable. A model composing a cell from document text can produce
+one by accident. Cells are prefixed so they are written as text.
+
+**Filenames.** The model composes the title, and it reaches a
+`Content-Disposition` header — where a newline is **header injection** and
+`../` would be path traversal if files were ever written to disk. Whitelisted
+to `[A-Za-z0-9 _-]`, same reasoning as the calculator's AST: the set of
+dangerous inputs is unbounded, the set of safe characters is not.
+
+**PDF text.** fpdf's core fonts are latin-1 only, so an em dash from a model —
+which they emit constantly — raises an exception mid-render.
+
+**The pattern: anything a model composes is untrusted input to whatever
+consumes it next**, and each consumer has its own idea of what is special.
+
+### C98 — Matplotlib on a server needs two things said out loud
+```python
+matplotlib.use("Agg")          # before pyplot is imported
+...
+finally:
+    plt.close(figure)
+```
+
+The default backend wants a window system. On a server there is none, so the
+first call hangs or crashes depending on the host — and it must be chosen
+*before* `pyplot` is imported, because the import binds it.
+
+And pyplot keeps a reference to every figure it creates, so they are never
+garbage collected. A server drawing charts all day leaks until it dies. There
+is a test asserting `plt.get_fignums() == []` after twelve charts, because this
+is invisible until production.
+
 ---
 
 ## 📊 REFERENCE — LLM API pricing (2026-08-02)
@@ -1144,3 +1219,4 @@ Plus a module-name collision caught by mypy → C35 / D15.
 | 2026-10-12 | **v0.3 design doc** — `DESIGN_v0.3.md` written before any code. Settles how tools are declared (JSON Schema, vendor-neutral), how the loop is bounded, why streaming and tools conflict, how tool failures feed back, that `Message` must become a dataclass, and that Block 1 ships no tool with side effects. Concepts C89–C90, decisions D38–D42 |
 | 2026-11-01 | **Documentation rule made absolute (D43).** `WHY.md` written covering v0.1-v0.3: per block, the problem, what was built, what was rejected and why, what the architecture gained, what it cost — plus a chapter on the four shipped defects and the questions an interviewer asks. `FILE_GUIDE.md` gains a **Contains** block for all 28 modules listing their functions and classes. README corrected: it still claimed v0.1 and omitted PostgreSQL and migrations |
 | 2026-11-01 | **v0.3 Block 1 — tool-use framework.** `Tool` protocol, `ToolRegistry` that never raises, `Calculator` with an AST whitelist, tool-aware streaming in the Groq adapter, and the bounded loop in `ChatService`. D40 superseded by D44 during implementation. 79 tests; verified against the live Groq API — the model called the tool and returned the correct product of two five-digit numbers. Concepts C91–C94, decision D44 |
+| 2026-11-01 | **v0.3 Blocks 2–4 — three generator tools.** An `ArtifactStore` (PostgreSQL, owned per user) plus `create_document` (fpdf2), `create_spreadsheet` (openpyxl) and `create_chart` (matplotlib). `ToolContext` added so a tool knows who it acts for. 97 tests. Verified live: one question produced a bar chart *and* a spreadsheet, the model choosing both tools in a single turn. Concepts C95–C98, decisions D45–D47 |
