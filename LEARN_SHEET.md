@@ -23,10 +23,11 @@
 | **D10** | **v0.1 runs on Groq free tier — `llama-3.3-70b-versatile`** | Budget is $0. Groq = ~1,000 req/day, 30 RPM, **no credit card, ongoing**; Anthropic has no free tier. v0.1 needs ~200 requests total. ⚠️ **Groq ≠ Grok** — Groq is an inference provider serving open-weight models (free); Grok is xAI's model ($25 credits then paid). Config is provider-neutral: `LLM_PROVIDER` / `LLM_API_KEY` / `LLM_MODEL`. | Yes — that's the point of D8 |
 | **D11** | **Conversation history must be trimmed** (Block 4), not left unbounded | Groq's free tier caps ~**14,400 tokens/minute**. Per C10, a 40-turn conversation is ~40K tokens in *one* request — over the entire per-minute budget. **A limit that makes you build it right beats unlimited quota that lets you build it wrong.** | No |
 | **D13** | **Model switched to `openai/gpt-oss-120b`** on Groq | Changed by editing **one line of `.env`** — zero code changes. Live proof that D3 + D8 work. | Yes — one line |
+| **D44** | **Streaming and tool detection happen in one pass — supersedes D40** | D40 said *run the loop non-streaming, then stream the answer*. Implementing it exposed a flaw: once the loop ends you already hold the final text, so you either regenerate it (double tokens, double latency) or fake-stream text in hand. Watching for tool-call deltas costs one accumulator keyed by index, and keeps genuine streaming including the preamble a model emits before calling a tool. | Yes |
 | **D43** | **Every block ends by updating all four documents in the same commit** | The documents are the deliverable, not a by-product: their purpose is answering *"you used AI, but do you know what you chose and why"*. Reconstructed later, the reasoning is already gone — the *why* fades first. `FILE_GUIDE.md` also carries each file's functions at a high level, because the likely interview question is "open this file and tell me what it does", not "recite line 40". | No — standing rule |
 | **D42** | **No tool with side effects in v0.3 Block 1** | D32's prompt injection was cosmetic while the model could only *speak*. A tool catalogue lets an injected instruction make it *act*, so the first tools compute and return — nothing writes, nothing takes a URL from the model. Web search in v0.4 is the first dangerous tool and gets its own review. | Yes, per tool |
 | **D41** | **`Message` becomes a dataclass with optional tool fields, rather than a second store for tool state** | `dict[str, str]` cannot express a call id, a tool name and arguments. Keeping tool turns beside the conversation would mean two sources of truth about what was said; a tool call *is* a turn. Costs a refactor of a type every layer touches. | No — this is the shape |
-| **D40** | **The tool loop runs non-streaming; only the final answer is streamed** | You cannot stream a reply the model has not committed to, and the first thing back may be tool calls rather than prose. Streaming while watching for tool-call deltas is provider-specific and much more code. The cost is a wait before the first token; a thinking indicator is the cheaper fix. | Yes |
+| **D40** | ~~The tool loop runs non-streaming; only the final answer is streamed~~ **superseded by D44** | You cannot stream a reply the model has not committed to, and the first thing back may be tool calls rather than prose. Streaming while watching for tool-call deltas is provider-specific and much more code. The cost is a wait before the first token; a thinking indicator is the cheaper fix. | Yes |
 | **D39** | **The tool loop is bounded by `max_tool_iterations` (default 5)** | A model can call tools indefinitely — search, search again, search again — burning the token budget and hanging the request with no error. On exhaustion the model is told it may not call more tools, so it still produces an answer rather than the request dying. | Yes |
 | **D38** | **Tools are declared vendor-neutrally with JSON Schema; the client adapter translates** | Groq wants `{type: "function", function: {...}}`, Anthropic wants `{name, description, input_schema}`. Letting either shape reach the service layer would make swapping provider stop being a config change. Same rule as D8 (LLM client) and D27 (embedder), applied a third time. | No — this is the design |
 | **D37** | **Verify UI work by driving a real browser, not by reading the code** | Streamlit's own headless test harness reported no exception and every control present, yet the rendered page had three defects it could not see: an icon font overridden into literal text, an uploader whose only entry point was hidden, and an avatar value that crashed every assistant reply. Chrome over the DevTools Protocol was already on the machine and needed no install. | n/a — practice |
@@ -927,6 +928,69 @@ This is the same lesson as SQL injection with one difference that makes it
 harder: a parameterised query separates code from data, and a model has only
 one channel for both.
 
+### C91 — A design doc is a hypothesis, and implementing it is the test
+D40 was written on paper and looked obviously right: run the tool loop without
+streaming, then stream the final answer. Writing the code exposed the flaw in a
+minute — when the loop ends you are already *holding* the final text, so
+"streaming the final answer" means either regenerating it at double cost or
+pretending to stream something you already have.
+
+The fix was to handle both in one pass. Providers send tool calls as fragments
+keyed by `index`: the id and name arrive first, then the arguments a few
+characters at a time. One accumulator reassembles them while text streams
+through untouched.
+
+**The design doc still earned its place** — it caught the `Message` refactor and
+the injection escalation before a line was written. The lesson is narrower: a
+design doc is a *hypothesis*, implementation is the experiment, and superseding
+an entry is the process working rather than failing.
+
+### C92 — `eval()` on model output is remote code execution
+The calculator could have been three lines: `return str(eval(expression))`. That
+would be a remote code execution hole, and a specific one — the model's input
+can come from an **uploaded PDF**, so an attacker who can get a document indexed
+can run arbitrary Python on the server.
+
+```python
+'__import__("os").system("rm -rf /")'   # valid Python, refused here
+'[].__class__.__base__.__subclasses__()'  # the classic eval escape
+```
+
+The defence is a whitelist, not a blacklist: parse to an AST and evaluate **only**
+`BinOp`, `UnaryOp` and numeric `Constant` nodes. Anything else — a name, a call,
+an attribute, a subscript — is refused before it runs. Blacklisting dangerous
+strings fails because the set of dangerous strings is unbounded.
+
+One more bound that is easy to miss: `2 ** 10_000_000` is plain arithmetic,
+needs no escape, and will hang the process while it exhausts memory. **Capping
+the exponent is cheaper than timing the call out.**
+
+### C93 — A tool failure is a message, not an exception
+`ToolRegistry.run()` never raises. Division by zero, a tool name the model
+invented, malformed JSON arguments — each becomes text sent back to the model:
+
+```
+calculate failed: division by zero
+```
+
+The model then corrects itself or explains to the user. Raising instead would
+turn *"the model asked for something impossible"* into a 500 for a user who did
+nothing wrong.
+
+The distinction to keep: **a tool failing is ordinary and recoverable; the
+provider being unreachable is not.** `LLMError` still propagates.
+
+### C94 — The protocol takes `**kwargs` because the caller is a model
+`Tool.run(self, **kwargs: Any) -> str` rather than an explicit signature, because
+arguments arrive as arbitrary JSON the model composed. A tool with
+`def run(self, n: int)` cannot satisfy the protocol — mypy says so, and that is
+correct.
+
+The consequence is that **each tool validates its own arguments.** JSON Schema
+constrains *shape*, never meaning: it can say "expression is a string", not
+"expression is arithmetic". A test that assumed a signature mismatch would be
+caught by the registry was wrong, and mypy caught the test.
+
 ---
 
 ## 📊 REFERENCE — LLM API pricing (2026-08-02)
@@ -1079,3 +1143,4 @@ Plus a module-name collision caught by mypy → C35 / D15.
 | 2026-10-12 | **v0.2 SHIPPED, tagged `v0.2`.** Accounts, PostgreSQL persistence, JWT auth with ownership in the query, and the full RAG pipeline: PDF extraction, chunking, local embeddings, pgvector storage, retrieval into chat, upload UI. 37 modules, 54 tests, 4 migrations, CI green, one branch on the remote |
 | 2026-10-12 | **v0.3 design doc** — `DESIGN_v0.3.md` written before any code. Settles how tools are declared (JSON Schema, vendor-neutral), how the loop is bounded, why streaming and tools conflict, how tool failures feed back, that `Message` must become a dataclass, and that Block 1 ships no tool with side effects. Concepts C89–C90, decisions D38–D42 |
 | 2026-11-01 | **Documentation rule made absolute (D43).** `WHY.md` written covering v0.1-v0.3: per block, the problem, what was built, what was rejected and why, what the architecture gained, what it cost — plus a chapter on the four shipped defects and the questions an interviewer asks. `FILE_GUIDE.md` gains a **Contains** block for all 28 modules listing their functions and classes. README corrected: it still claimed v0.1 and omitted PostgreSQL and migrations |
+| 2026-11-01 | **v0.3 Block 1 — tool-use framework.** `Tool` protocol, `ToolRegistry` that never raises, `Calculator` with an AST whitelist, tool-aware streaming in the Groq adapter, and the bounded loop in `ChatService`. D40 superseded by D44 during implementation. 79 tests; verified against the live Groq API — the model called the tool and returned the correct product of two five-digit numbers. Concepts C91–C94, decision D44 |

@@ -476,9 +476,17 @@ each change the shape of code in three layers at once.
 code. After Block 1 it is a new *tool*, which is why blocks 2–4 are hours each
 rather than days.
 
+**Why this order.** Block 1 first because everything after it is a *tool*, and
+a tool cannot exist before the thing that runs tools. Blocks 2–4 next, because
+each is small once the framework exists and together they prove the claim that
+capabilities became cheap. Block 5 (queue) after the tools, because the queue
+only matters once something slow exists to put in it. Block 6 (logging) last,
+because it instruments everything before it — written earlier, it would have to
+be revised after every block.
+
 | # | Block | Status |
 |---|-------|--------|
-| 1 | Tool-use framework: `Tool` protocol, registry, bounded loop, `Message` refactor | ⬜ |
+| 1 | Tool-use framework: `Tool` protocol, registry, bounded loop, `Message` refactor | ✅ |
 | 2 | Document generation (PDF) as a tool | ⬜ |
 | 3 | Spreadsheet generation (CSV / Excel) as a tool | ⬜ |
 | 4 | Charts and data analysis as a tool | ⬜ |
@@ -491,6 +499,49 @@ Schema with the adapter translating · the loop bounded by `max_tool_iterations`
 becomes a dataclass carrying tool fields · **no tool with side effects in Block
 1**, because a tool catalogue turns prompt injection from speech into action
 (C90).
+
+---
+
+### Block 1 — the framework ✅
+
+**Why first:** every later capability is a tool, and a tool cannot exist before
+the thing that runs tools. Done in two commits on purpose — the `Message`
+refactor has no behaviour change, so if the loop misbehaves later `git bisect`
+can tell the two apart.
+
+**Files**
+
+| File | Purpose |
+|---|---|
+| `app/tools/base.py` | `Tool` protocol, `ToolSpec`, `ToolError` |
+| `app/tools/registry.py` | name → tool; runs calls and **never raises** |
+| `app/tools/calculator.py` | the first tool — pure, AST-whitelisted |
+| `app/clients/base.py` | `StreamEvent`; `stream_chat` takes a catalogue |
+| `app/clients/groq_client.py` | `tool_to_wire()` + tool-call accumulation |
+| `app/services/chat.py` | the bounded loop (`_stream`, `_turn`) |
+| `app/domain.py` | `Message` dataclass + `ToolCall` (earlier commit) |
+
+**Key points**
+- **D40 superseded by D44 during implementation.** Streaming and tool detection
+  happen in one pass: ending the loop leaves you holding the final text, so
+  "stream it afterwards" means regenerating it or faking it
+- Providers send tool calls **in fragments keyed by `index`** — id and name
+  first, arguments a few characters at a time. One accumulator reassembles them
+- `ToolRegistry.run()` **never raises**: a bad tool call is the model's problem
+  to recover from, not a 500 for a user who did nothing wrong
+- The calculator **parses to an AST and whitelists node types**. `eval()` would
+  be remote code execution, and the input can come from an uploaded PDF
+- `2 ** 10_000_000` is plain arithmetic that hangs the process — the exponent is
+  capped, which is cheaper than a timeout
+- The loop is bounded by `max_tool_iterations`; on exhaustion the model is told
+  to stop, so the user gets an answer rather than a request that dies
+
+**Verify**
+```bash
+uv run pytest                      # 79 tests
+# live: the model calls the tool and uses the result
+uv run python -c "..."             # 48271 * 9183 -> 443272593 ✓
+```
 
 ---
 

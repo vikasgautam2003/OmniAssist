@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     embedding_provider: Literal["local", "gemini"] = "local"
     retrieval_top_k: int = 4
     max_upload_bytes: int = 10_000_000
+    max_tool_iterations: int = 5
 
     app_env: Literal["local", "staging", "production"] = "local"
 

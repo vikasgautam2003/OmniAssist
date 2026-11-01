@@ -17,6 +17,8 @@ from app.repositories.postgres import (
 from app.routes.deps import CurrentUser
 from app.services.chat import ChatService
 from app.services.retrieval import Retriever
+from app.tools.calculator import Calculator
+from app.tools.registry import ToolRegistry
 
 router = APIRouter()
 
@@ -33,8 +35,13 @@ def get_chat_service() -> ChatService:
         PostgresChunkRepository(),
         top_k=get_settings().retrieval_top_k,
     )
+    settings = get_settings()
     return ChatService(
-        get_llm_client(), PostgresConversationRepository(), retriever=retriever
+        get_llm_client(),
+        PostgresConversationRepository(),
+        retriever=retriever,
+        tools=ToolRegistry([Calculator()]),
+        max_tool_iterations=settings.max_tool_iterations,
     )
 
 

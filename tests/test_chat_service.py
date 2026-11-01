@@ -2,10 +2,13 @@ import uuid
 
 import pytest
 
-from app.domain import Message
+from app.domain import Message, ToolCall
 from app.repositories.base import ConversationNotFoundError
 from app.repositories.memory import InMemoryChunkRepository
+from app.services.chat import NO_MORE_TOOLS
 from app.services.retrieval import Retriever
+from app.tools.calculator import Calculator
+from app.tools.registry import ToolRegistry
 from tests.conftest import ServiceFactory
 from tests.fakes import FakeEmbedder
 
@@ -188,3 +191,109 @@ def test_nothing_retrieved_leaves_the_prompt_alone(
     "".join(service.stream_reply("c1", user_id, "what is the capital of France?"))
 
     assert all(message.role != "system" for message in fake.calls[0])
+
+
+def _calc_registry() -> ToolRegistry:
+    return ToolRegistry([Calculator()])
+
+
+def _call(
+    name: str = "calculate", arguments: str = '{"expression": "6*7"}'
+) -> ToolCall:
+    return ToolCall(id="c1", name=name, arguments=arguments)
+
+
+def test_a_tool_the_model_asks_for_is_run_and_fed_back(
+    make_service: ServiceFactory, user_id: uuid.UUID
+) -> None:
+    service, fake = make_service(
+        reply="42", tools=_calc_registry(), tool_calls=[[_call()]]
+    )
+
+    "".join(service.stream_reply("c1", user_id, "what is 6 times 7?"))
+
+    second_turn = fake.calls[1]
+    assert second_turn[-1].role == "tool"
+    assert second_turn[-1].content == "42"
+    assert second_turn[-1].tool_call_id == "c1"
+
+
+def test_the_catalogue_is_offered_to_the_model(
+    make_service: ServiceFactory, user_id: uuid.UUID
+) -> None:
+    service, fake = make_service(tools=_calc_registry())
+
+    "".join(service.stream_reply("c1", user_id, "hello"))
+
+    assert [spec.name for spec in fake.tools_offered[0]] == ["calculate"]
+
+
+def test_no_tools_means_no_catalogue(
+    make_service: ServiceFactory, user_id: uuid.UUID
+) -> None:
+    service, fake = make_service()
+
+    "".join(service.stream_reply("c1", user_id, "hello"))
+
+    assert fake.tools_offered[0] == []
+
+
+def test_the_tool_turn_is_stored_in_history(
+    make_service: ServiceFactory, user_id: uuid.UUID
+) -> None:
+    """A tool call is a turn in the conversation, not a separate store."""
+    service, _ = make_service(
+        reply="42", tools=_calc_registry(), tool_calls=[[_call()]]
+    )
+
+    "".join(service.stream_reply("c1", user_id, "what is 6 times 7?"))
+
+    roles = [m.role for m in service.get_history("c1", user_id)]
+    assert roles == ["user", "assistant", "tool", "assistant"]
+
+
+def test_a_failing_tool_does_not_fail_the_request(
+    make_service: ServiceFactory, user_id: uuid.UUID
+) -> None:
+    """The error becomes text the model can read, not a 500 for the user."""
+    service, fake = make_service(
+        reply="I cannot divide by zero.",
+        tools=_calc_registry(),
+        tool_calls=[[_call(arguments='{"expression": "1/0"}')]],
+    )
+
+    reply = "".join(service.stream_reply("c1", user_id, "what is 1/0?"))
+
+    assert reply == "I cannot divide by zero."
+    assert "zero" in fake.calls[1][-1].content
+
+
+def test_the_loop_is_bounded(make_service: ServiceFactory, user_id: uuid.UUID) -> None:
+    """A model that keeps calling tools would otherwise burn the token budget
+    and hang the request with no error at all."""
+    forever = [[_call()] for _ in range(50)]
+    service, fake = make_service(
+        reply="done",
+        tools=_calc_registry(),
+        tool_calls=forever,
+        max_tool_iterations=3,
+    )
+
+    "".join(service.stream_reply("c1", user_id, "loop please"))
+
+    assert len(fake.calls) == 4, "three tool turns, then one final answer"
+    assert NO_MORE_TOOLS in fake.calls[-1][-1].content
+
+
+def test_text_before_a_tool_call_still_streams(
+    make_service: ServiceFactory, user_id: uuid.UUID
+) -> None:
+    """Models often say 'let me check that' before calling a tool. Streaming
+    and tool detection happen together so the preamble is not swallowed."""
+    service, _ = make_service(
+        reply="The answer is 42.", tools=_calc_registry(), tool_calls=[[_call()]]
+    )
+
+    reply = "".join(service.stream_reply("c1", user_id, "what is 6 times 7?"))
+
+    assert reply == "The answer is 42."

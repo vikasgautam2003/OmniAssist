@@ -784,6 +784,75 @@ This is the same shape as SQL injection, with one difference that makes it
 harder: a parameterised query separates code from data, and **a model has only
 one channel for both.**
 
+### Block 1 — what was built, and one correction
+
+**The order within v0.3 is deliberate.** Block 1 first, because every later
+capability *is* a tool and a tool cannot exist before the thing that runs them.
+Blocks 2–4 next, because each is small once the framework exists — which is how
+the claim "capabilities became cheap" gets proved rather than asserted. Block 5
+(the queue) after the tools, because a queue only matters once something slow
+exists to put in it. Block 6 (logging) last, because it instruments everything
+before it; written earlier it would need revising after every block.
+
+**What was built.** `Tool` protocol, `ToolRegistry`, a `Calculator`,
+tool-aware streaming in the Groq adapter, and the bounded loop. Verified against
+the live API: asked for 48271 × 9183, the model called the tool and answered
+443,272,593 — correct.
+
+**The correction.** The design doc said *run the loop non-streaming, then stream
+the final answer* (D40). Implementing it exposed the flaw in minutes: when the
+loop ends you are already **holding** the final text, so "stream it afterwards"
+means either regenerating it — double tokens, double latency — or pretending to
+stream something already in hand.
+
+The fix was to do both in one pass. Providers send tool calls as fragments keyed
+by `index`: the id and name arrive first, then the arguments a few characters at
+a time. One accumulator reassembles them while text streams through untouched.
+That also keeps the preamble — the *"let me check that"* a model often emits
+before calling a tool — which the two-pass design would have swallowed.
+
+**D40 is superseded by D44, and that is the process working.** The design doc
+still earned its place: it caught the `Message` refactor and the injection
+escalation before a line was written. A design doc is a hypothesis;
+implementation is the experiment.
+
+### Why the calculator is not three lines
+
+```python
+return str(eval(expression))      # never
+```
+
+That is remote code execution, and specifically so: the model's input can come
+from an **uploaded PDF**, so anyone who can get a document indexed could run
+Python on the server.
+
+The defence is a **whitelist, not a blacklist**: parse to an AST and evaluate
+only `BinOp`, `UnaryOp` and numeric `Constant` nodes. Anything else — a name, a
+call, an attribute, a subscript — is refused before it runs. Blacklisting
+dangerous strings fails because the set of dangerous strings is unbounded, and
+the classic escape (`[].__class__.__base__.__subclasses__()`) contains nothing
+that looks dangerous.
+
+One bound that is easy to miss: `2 ** 10_000_000` is plain arithmetic, needs no
+escape, and hangs the process while exhausting memory. **Capping the exponent is
+cheaper than timing the call out.**
+
+### Why the registry never raises
+
+A tool call can fail in four ordinary ways: the model invents a tool name, sends
+malformed JSON, sends arguments the tool cannot use, or asks for something
+impossible like division by zero. Each becomes **text fed back to the model**:
+
+```
+calculate failed: division by zero
+```
+
+The model then corrects itself or explains. Raising would turn *"the model asked
+for something impossible"* into a 500 for a user who did nothing wrong.
+
+The line to hold: **a tool failing is ordinary and recoverable; the provider
+being unreachable is not.** `LLMError` still propagates.
+
 ---
 
 ## Part 4 — Every file, and what it is for

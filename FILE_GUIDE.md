@@ -118,7 +118,8 @@ it.
 
 **Contains**
 
-- `LLMClient` — the protocol — `chat()` and `stream_chat()`
+- `LLMClient` — the protocol — `stream_chat(messages, tools)`
+- `StreamEvent` — one thing back from the model: text, or a completed tool call
 - `LLMError` — the vendor-neutral failure every provider error becomes
 
 **Why** — the application depends on this declaration rather than on a vendor
@@ -134,8 +135,9 @@ configured.
 
 **Contains**
 
-- `GroqClient` — `chat()` for a whole reply, `stream_chat()` for token-by-token
+- `GroqClient.stream_chat()` — streams text **and** accumulates tool-call fragments
 - `to_wire()` — translates one `Message` into Groq's shape, including tool calls
+- `tool_to_wire()` — translates a `ToolSpec` into Groq's function-calling shape
 
 **Why** — Groq's free tier (~1,000 requests/day, no card) is what makes a
 zero-budget project possible. This is also the **error boundary**: whatever the
@@ -303,6 +305,58 @@ application interface and must stay in step with it.
 
 ## Services — the behaviour
 
+### `app/tools/base.py`
+**Is** — the `Tool` protocol, `ToolSpec` and `ToolError`.
+
+**Contains**
+
+- `Tool` — the protocol: `name`, `description`, `parameters`, `run(**kwargs)`
+- `ToolSpec` — what the model is told about a tool, vendor-neutral
+- `ToolError` — a recoverable failure, written for a reader
+
+**Why** — `description` is **prompt, not documentation**: it is the only thing
+the model reads when deciding whether to call the tool, so a vague one is a
+functional defect. `run` takes `**kwargs` because arguments arrive as arbitrary
+JSON the model composed, which means each tool validates its own.
+
+**Fits** — depended on by the registry and by the client adapter, which
+translates `ToolSpec` into the provider's dialect.
+
+### `app/tools/registry.py`
+**Is** — `ToolRegistry`: holds the tools and runs the ones the model asks for.
+
+**Contains**
+
+- `catalogue()` — the `ToolSpec` list offered to the model
+- `run(call)` — executes one call and returns what the model should see
+
+**Why** — `run()` **never raises**. An unknown tool name, malformed JSON, a
+division by zero: each becomes text fed back so the model can correct itself.
+Raising would turn the model asking for something impossible into a 500 for a
+user who did nothing wrong.
+
+**Fits** — between `ChatService` and the tools themselves.
+
+### `app/tools/calculator.py`
+**Is** — `Calculator`, the first tool: arithmetic, because models are unreliable
+at it.
+
+**Contains**
+
+- `Calculator` — the four protocol members
+- `_evaluate()` — walks the AST, evaluating only arithmetic nodes
+- `MAX_EXPONENT` — caps `2 ** n`, which is plain arithmetic that hangs a process
+
+**Why** — `eval()` here would be **remote code execution**, and specifically so:
+the model's input can come from an uploaded PDF, so anyone who can get a
+document indexed could run Python on the server. The defence is a whitelist —
+parse to an AST and evaluate only `BinOp`, `UnaryOp` and numeric `Constant` —
+because blacklisting dangerous strings fails against an unbounded set.
+
+**Fits** — pure by design. The first tools have no side effects because a tool
+catalogue turns prompt injection from something the model *says* into something
+it *does*.
+
 ### `app/services/chat.py`
 **Is** — `ChatService`: loads history, calls the model, streams the reply,
 persists both sides of the exchange.
@@ -311,7 +365,9 @@ persists both sides of the exchange.
 
 - `ChatService.stream_reply()` — records the question, loads history, grounds it, returns the token stream
 - `ChatService._ground()` — prepends retrieved passages for this one call
-- `ChatService._stream()` — the generator; persists the assistant turn when the stream ends
+- `ChatService._stream()` — the bounded tool loop; runs tools and feeds results back
+- `ChatService._turn()` — one exchange: streams the model's text, collects its tool calls
+- `NO_MORE_TOOLS` — what the model is told when the iteration limit is reached
 - `ChatService.get_history()` — a defensive copy, so a caller cannot mutate stored history
 - `GROUNDING`, `_format_passages()` — the system-message template and the passage formatter
 
@@ -707,5 +763,5 @@ This document.
 
 ---
 
-*Updated through v0.2 (shipped) and the v0.3 design. Revise when
+*Updated through v0.3 Block 1 (tool-use framework). Revise when
 files are added, removed, or change purpose.*
