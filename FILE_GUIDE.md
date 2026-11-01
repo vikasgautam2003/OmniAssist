@@ -41,6 +41,11 @@ nothing.
 **Is** — the FastAPI application: creates `app`, mounts the auth and chat
 routers, exposes `GET /healthz`.
 
+**Contains**
+
+- `lifespan()` — validates configuration before the server accepts traffic
+- `healthz()` — liveness probe; deliberately makes no provider call
+
 **Why** — something has to assemble the application, and it is also where
 **fail-fast configuration** is re-established. `get_settings()` is called inside
 the `lifespan` handler, so a missing or malformed setting stops the process from
@@ -53,6 +58,11 @@ else in the app.
 **Is** — the `Settings` model (database URL, JWT secret, LLM provider and model,
 chunk size and overlap, embedding provider) plus `get_settings()`, cached with
 `lru_cache`.
+
+**Contains**
+
+- `Settings` — every runtime value, typed and validated — database URL, JWT secret, LLM provider and model, chunk size and overlap, embedding provider, retrieval top-k, upload limit
+- `get_settings()` — builds it once, cached; called at startup, never at import
 
 **Why** — one typed, validated place for every value that differs between
 machines. Secrets use `SecretStr` so they cannot be printed in a log or
@@ -83,6 +93,13 @@ from anywhere, including tests.
 **Is** — the shared vocabulary: `Message`, `Vector`, the frozen `User` and
 `Chunk` dataclasses.
 
+**Contains**
+
+- `Message` — one turn in a conversation — role, content, and optional tool fields
+- `ToolCall` — one request from the model to run a tool: id, name, raw JSON arguments
+- `User`, `Chunk` — frozen records for an account and a retrievable passage
+- `Vector` — alias for `list[float]`
+
 **Why** — these types cross every layer. If they lived in the database module,
 the service layer would import the database to describe a message; if they lived
 in the HTTP module, the repository would import FastAPI. A dependency-free
@@ -99,6 +116,11 @@ it.
 ### `app/clients/base.py`
 **Is** — the `LLMClient` **Protocol** (`chat`, `stream_chat`) and `LLMError`.
 
+**Contains**
+
+- `LLMClient` — the protocol — `chat()` and `stream_chat()`
+- `LLMError` — the vendor-neutral failure every provider error becomes
+
 **Why** — the application depends on this declaration rather than on a vendor
 SDK, so changing provider is a configuration change. `Protocol` rather than an
 abstract base class means the test fake satisfies it **without inheriting from
@@ -109,6 +131,11 @@ configured.
 
 ### `app/clients/groq_client.py`
 **Is** — the Groq implementation of that Protocol.
+
+**Contains**
+
+- `GroqClient` — `chat()` for a whole reply, `stream_chat()` for token-by-token
+- `to_wire()` — translates one `Message` into Groq's shape, including tool calls
 
 **Why** — Groq's free tier (~1,000 requests/day, no card) is what makes a
 zero-budget project possible. This is also the **error boundary**: whatever the
@@ -121,6 +148,10 @@ Groq exists.
 ### `app/clients/factory.py`
 **Is** — `get_llm_client()`, cached, returning the configured implementation.
 
+**Contains**
+
+- `get_llm_client()` — reads config, returns an `LLMClient`, cached per process
+
 **Why** — the composition root for the LLM. Callers ask for *an* `LLMClient` and
 never name a concrete class, which is what keeps the dependency rule intact.
 
@@ -131,6 +162,12 @@ never name a concrete class, which is what keeps the dependency rule intact.
 ### `app/embeddings/base.py`
 **Is** — the `Embedder` Protocol (`model_id`, `dimensions`, `embed_documents`,
 `embed_query`), `EmbeddingError`, and `EMBEDDING_DIMENSIONS = 384`.
+
+**Contains**
+
+- `Embedder` — the protocol — `model_id`, `dimensions`, `embed_documents()`, `embed_query()`
+- `EMBEDDING_DIMENSIONS` — 384; the single source of truth for the pgvector column width
+- `EmbeddingError` — the vendor-neutral failure
 
 **Why** — embeddings are *not* interchangeable the way LLM providers are. A
 vector is only meaningful against the model that produced it: dimensions differ
@@ -150,6 +187,11 @@ vectors.
 **Is** — `LocalEmbedder`: `bge-small-en-v1.5` via `fastembed`, running on this
 machine.
 
+**Contains**
+
+- `LocalEmbedder` — the four protocol members, backed by fastembed
+- `MODEL_ID`, `QUERY_PREFIX` — the model name and the instruction bge expects on queries only
+
 **Why** — hosted embedding APIs cost money per request; this one costs nothing
 and needs no key, which also keeps CI free of network calls. Queries get an
 instruction prefix that documents do not, because that is what the model was
@@ -160,6 +202,10 @@ which is why nothing constructs it at import time and no test touches it.
 
 ### `app/embeddings/factory.py`
 **Is** — `get_embedder()`, cached, switching on `embedding_provider`.
+
+**Contains**
+
+- `get_embedder()` — returns the configured embedder; imports the local one *inside* the function so importing the factory costs nothing
 
 **Why** — same composition-root role as the LLM factory, with one extra trick:
 the import of `LocalEmbedder` sits **inside the function**, so importing the
@@ -175,6 +221,11 @@ documented in the type, and the gap fails loudly.
 **Is** — the SQLAlchemy tables: `Conversation`, `MessageRow`, `UserRow`,
 `DocumentChunk`.
 
+**Contains**
+
+- `Conversation`, `MessageRow`, `UserRow`, `DocumentChunk` — the four tables
+- `Base` — the declarative base Alembic diffs against the live schema
+
 **Why** — one declarative description of the schema, which Alembic diffs against
 the live database to generate migrations. `DocumentChunk` carries the
 `vector(384)` column, plus `document_name` and `chunk_index` so an answer can
@@ -187,6 +238,11 @@ this module; services deal in `app/domain.py` types.
 ### `app/db/session.py`
 **Is** — `get_engine()` and `get_session_factory()`, both cached.
 
+**Contains**
+
+- `get_engine()` — one connection pool per process
+- `get_session_factory()` — sessions bound to that engine
+
 **Why** — an engine owns a connection pool and must exist once per process, not
 once per request. `pool_pre_ping=True` checks a connection before handing it out,
 so a database restart doesn't surface as a random error.
@@ -194,6 +250,13 @@ so a database restart doesn't surface as a random error.
 ### `app/repositories/base.py`
 **Is** — the `ConversationRepository`, `UserRepository` and `ChunkRepository`
 Protocols, plus `EmailAlreadyExistsError` and `ConversationNotFoundError`.
+
+**Contains**
+
+- `ConversationRepository` — `get_history()`, `add_message()`
+- `UserRepository` — `get_by_id()`, `get_by_email()`, `create()`
+- `ChunkRepository` — `add()`, `search()`, `delete_document()`, `list_documents()`
+- `EmailAlreadyExistsError`, `ConversationNotFoundError` — storage failures translated out of SQLAlchemy
 
 **Why** — storage behind an interface, for the same reason as the LLM. The
 errors are deliberately vendor-neutral: a caller must never catch
@@ -203,6 +266,13 @@ which would let them enumerate real IDs.
 
 ### `app/repositories/postgres.py`
 **Is** — the real implementations against PostgreSQL.
+
+**Contains**
+
+- `PostgresConversationRepository` — history and appends, with ownership in the `WHERE` clause
+- `PostgresUserRepository` — lookup and create, translating `IntegrityError`
+- `PostgresChunkRepository` — vector insert, cosine-distance search, delete and list by document
+- `_from_row()` — database row → `Message`, including tool fields
 
 **Why** — this is where **ownership is enforced**, inside the `WHERE` clause
 rather than as a check beside the query. There is no way to read a conversation
@@ -216,6 +286,11 @@ model was trained for — a different operator would silently rank worse.
 ### `app/repositories/memory.py`
 **Is** — in-memory implementations of the same three Protocols, plus a
 hand-written `cosine_distance()`.
+
+**Contains**
+
+- `InMemoryConversationRepository`, `InMemoryUserRepository`, `InMemoryChunkRepository` — the same three protocols over dicts and lists
+- `cosine_distance()` — what pgvector's `<=>` computes, written out so it is testable without a database
 
 **Why** — the test double. The suite runs with no database because these satisfy
 the same interfaces. The distance function is written out rather than imported so
@@ -231,6 +306,14 @@ application interface and must stay in step with it.
 ### `app/services/chat.py`
 **Is** — `ChatService`: loads history, calls the model, streams the reply,
 persists both sides of the exchange.
+
+**Contains**
+
+- `ChatService.stream_reply()` — records the question, loads history, grounds it, returns the token stream
+- `ChatService._ground()` — prepends retrieved passages for this one call
+- `ChatService._stream()` — the generator; persists the assistant turn when the stream ends
+- `ChatService.get_history()` — a defensive copy, so a caller cannot mutate stored history
+- `GROUNDING`, `_format_passages()` — the system-message template and the passage formatter
 
 **Why** — the orchestration that is neither HTTP nor storage. It also carries
 the project's most instructive bug: written originally as a generator, **none of
@@ -252,6 +335,10 @@ retriever interfaces, knows nothing about FastAPI.
 ### `app/services/indexing.py`
 **Is** — `Indexer`: turns an uploaded PDF into stored, embedded passages.
 
+**Contains**
+
+- `Indexer.index(user_id, name, data) -> int` — extract → chunk → embed → replace; returns how many passages were stored
+
 **Why** — the write-side mirror of `Retriever`, composing extraction, chunking
 and embedding in order. Two properties matter more than the composition:
 re-uploading a document **replaces** its passages rather than appending (otherwise
@@ -267,6 +354,10 @@ database.
 ### `app/services/retrieval.py`
 **Is** — `Retriever`: embeds a question and returns the passages closest to it.
 
+**Contains**
+
+- `Retriever.find(user_id, question)` — embeds the question and returns the closest passages, scoped to that user
+
 **Why** — its own class rather than two more collaborators bolted onto
 `ChatService`, which already has a client and a repository. This owns one job —
 *turn a question into relevant passages* — and can be tested without a
@@ -281,6 +372,11 @@ dictionary.
 ### `app/services/pdf.py`
 **Is** — `extract_text(data: bytes) -> str` and `PdfExtractionError`.
 
+**Contains**
+
+- `extract_text(bytes) -> str` — the text layer, or a `PdfExtractionError` explaining why not
+- `PdfExtractionError` — vendor-neutral; no caller ever sees a pypdf exception
+
 **Why** — stage one of retrieval. Takes bytes rather than a path or an upload
 object, which keeps it free of filesystem and HTTP concerns and testable in one
 line. One `except PyPdfError` contains all fourteen of the library's error types,
@@ -290,6 +386,12 @@ succeed while storing nothing is a worse failure than an error.
 
 ### `app/services/chunking.py`
 **Is** — `chunk_text(text, *, size, overlap) -> list[str]`.
+
+**Contains**
+
+- `chunk_text(text, *, size, overlap)` — overlapping passages, preferring natural boundaries
+- `_cut_at()` — pulls the end back to the best boundary in the last fifth of the window
+- `BOUNDARIES`, `BOUNDARY_WINDOW` — the preference order and how far back a boundary is worth taking
 
 **Why** — stage two, and the biggest quality knob in retrieval. A whole document
 embeds to the average of everything it says, which matches nothing; the unit you
@@ -308,6 +410,13 @@ dropped 32 of 45 characters with no error at all.
 ### `app/routes/chat.py`
 **Is** — the chat endpoint, streaming replies over Server-Sent Events.
 
+**Contains**
+
+- `chat()` — `POST /chat/{id}` — streams the reply as SSE
+- `get_chat_service()` — builds the service with its retriever, once per process
+- `_to_sse()` — wraps each chunk as an SSE frame and sends the `[DONE]` sentinel
+- `ChatRequest` — the request body
+
 **Why** — SSE rather than WebSockets because the traffic is one-directional and
 SSE is plain HTTP: no special proxy handling, automatic reconnection. Translates
 service exceptions into status codes — notably **404, not 403**, for another
@@ -316,12 +425,26 @@ user's conversation.
 ### `app/routes/auth.py`
 **Is** — `POST /auth/signup`, `POST /auth/login`, `GET /auth/me`.
 
+**Contains**
+
+- `signup()` — `POST /auth/signup` — 201, or 409 if the email is taken
+- `login()` — `POST /auth/login` — 200 with a token, or 401
+- `me()` — `GET /auth/me` — the signed-in user
+- `_dummy_hash()` — verified against when the email is unknown, so failure takes the same time either way
+
 **Why** — the credential boundary. Unknown email and wrong password return
 **identical** errors, and login compares against a dummy hash when the email is
 unknown so response time does not reveal whether an account exists.
 
 ### `app/routes/documents.py`
 **Is** — `POST /documents` (upload and index) and `GET /documents` (list names).
+
+**Contains**
+
+- `upload()` — `POST /documents` — size-checked, indexed, 201 with a passage count
+- `list_documents()` — `GET /documents` — the names indexed for this user
+- `get_indexer()` — builds the indexer once per process
+- `UploadResponse` — the response body
 
 **Why** — the upload boundary. Size is checked **before** the body is read,
 because `await file.read()` on a huge upload exhausts memory and FastAPI imposes
@@ -337,6 +460,11 @@ now; moving it to a queue is v0.3 work (D36).
 ### `app/routes/deps.py`
 **Is** — `get_current_user`, the `CurrentUser` alias, and `get_user_repository`.
 
+**Contains**
+
+- `get_current_user()` — bearer token → `User`, or 401; the user is looked up, not trusted from the token
+- `get_user_repository()` — the dependency the route asks for
+
 **Why** — one place that turns `Authorization: Bearer <token>` into a `User`, so
 every protected route gets identical behaviour. The user is **looked up**, not
 trusted from the token alone: a JWT cannot be revoked before it expires, so a
@@ -346,6 +474,12 @@ wrong code.
 
 ### `app/schemas/auth.py`
 **Is** — the Pydantic request and response models.
+
+**Contains**
+
+- `SignupRequest` — email and password, with `normalise_email()` applied once at the edge
+- `LoginRequest` — the same shape, reusing the validation
+- `TokenResponse`, `MeResponse` — what leaves the system — a filter, so a password hash cannot be serialised by accident
 
 **Why** — validation at the edge, once. Email normalisation happens here so no
 downstream code has to think about case. A response model is a **filter**: it
@@ -359,12 +493,22 @@ serialised by accident.
 ### `app/security/password.py`
 **Is** — Argon2id hashing and verification.
 
+**Contains**
+
+- `hash_password()` — Argon2id
+- `verify_password()` — catches only a mismatch; a corrupt hash must surface
+
 **Why** — Argon2id won the Password Hashing Competition and is deliberately
 *memory*-hard, so attacking it in parallel on GPUs gains far less than against a
 fast hash. Hashing is not encryption: there is no way back, which is the point.
 
 ### `app/security/tokens.py`
 **Is** — HS256 JWT creation and decoding.
+
+**Contains**
+
+- `create_access_token()` — HS256, with an expiry
+- `decode_access_token()` — verifies with the algorithm **pinned**
 
 **Why** — stateless sessions: the server verifies a signature instead of looking
 up a session. The verification algorithm is **pinned**, which closes the
@@ -378,6 +522,12 @@ by anyone holding it, so nothing secret goes inside.
 
 ### `ui/styles.py`
 **Is** — the interface's CSS, plus a `brand()` helper, as a single string.
+
+**Contains**
+
+- `inject()` — writes the CSS into the page once per run
+- `brand()` — the logo-and-title header both screens share
+- `CSS` — the stylesheet; colour tokens above it
 
 **Why** — Streamlit's theming API covers only a few colours, so everything past
 that is CSS aimed at its `data-testid` attributes. Keeping it here leaves the
@@ -400,6 +550,14 @@ the dropzone advertises the real limit instead of the 200 MB default.
 ### `ui/streamlit_app.py`
 **Is** — the web interface: login and signup tabs, chat with streaming output,
 a sidebar PDF uploader with the list of indexed documents, and logout.
+
+**Contains**
+
+- `render_auth()`, `submit_credentials()` — the login and signup screen
+- `render_chat()`, `render_sidebar()`, `render_welcome()` — the chat screen, document sidebar and empty state
+- `stream_reply()` — parses SSE frames from the backend
+- `upload_document()`, `fetch_documents()` — the document calls
+- `start_session()`, `end_session()` — token in and out of `st.session_state`
 
 **Why** — a usable front end in Python while the API stabilises; React arrives
 in v0.4. The UI calls the API over HTTP rather than importing the services, so
