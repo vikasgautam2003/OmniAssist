@@ -534,6 +534,12 @@ tools are declared, how the loop is bounded, why streaming and tools conflict,
 what happens when a tool fails, why `Message` must stop being a `dict`, and why
 Block 1 ships no tool with side effects.
 
+### `WHY.md`
+The reasoning behind every decision from v0.1 onward: what the problem was, what
+was built, **what was rejected and why**, what the architecture gained, and what
+it cost. Includes a chapter on the four defects that shipped and what each
+taught, and the questions an interviewer is likely to ask.
+
 ### `LEARN_SHEET.md`
 Concepts C1–C75 and decisions D1–D30, each with the alternative that was
 rejected and why. The primary interview source.

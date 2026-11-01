@@ -2,7 +2,7 @@
 
 A streaming AI assistant built as a **production engineering exercise** — one codebase evolved release by release, with the operational discipline each stage actually requires.
 
-**v0.1** — streaming chat with conversation memory, behind a provider-agnostic LLM layer.
+**v0.2** — accounts, persistent history, and questions answered from your own uploaded PDFs. Streaming throughout, behind provider-agnostic LLM and embedding layers.
 
 ---
 
@@ -41,28 +41,40 @@ The UI never holds an API key: it calls this backend, which calls the provider. 
 
 ## Quickstart
 
-**Prerequisites:** [uv](https://docs.astral.sh/uv/), and a free API key from [console.groq.com](https://console.groq.com)
+**Prerequisites**
+
+- [uv](https://docs.astral.sh/uv/)
+- **PostgreSQL 17+ with the [pgvector](https://github.com/pgvector/pgvector) extension** — the migration enables the extension, but the binary must already be installed (`brew install pgvector`)
+- A free API key from [console.groq.com](https://console.groq.com)
+
+**Set up**
 
 ```bash
 git clone https://github.com/vikasgautam2003/OmniAssist.git
 cd OmniAssist
 uv sync
 
-cp .env.example .env
-# edit .env and paste your key
+cp .env.example .env          # then edit .env: paste your key and DATABASE_URL
+
+createdb omniassist           # if the database does not exist yet
+uv run alembic upgrade head   # create the schema
 ```
 
-**Run the backend:**
+**Run it — two terminals**
+
 ```bash
+# terminal 1 — the API
 uv run uvicorn app.main:app --reload --port 8000
 ```
 
-**Run the UI** (second terminal):
 ```bash
+# terminal 2 — the interface
 uv run streamlit run ui/streamlit_app.py
 ```
 
-Open http://localhost:8501
+Open **http://localhost:8501**, sign up, and upload a PDF from the sidebar.
+
+> **The first upload takes about 30 seconds.** The embedding model (~130 MB) downloads on first use and is cached afterwards. Nothing is wrong; it only happens once.
 
 ---
 
