@@ -23,6 +23,7 @@
 | **D10** | **v0.1 runs on Groq free tier — `llama-3.3-70b-versatile`** | Budget is $0. Groq = ~1,000 req/day, 30 RPM, **no credit card, ongoing**; Anthropic has no free tier. v0.1 needs ~200 requests total. ⚠️ **Groq ≠ Grok** — Groq is an inference provider serving open-weight models (free); Grok is xAI's model ($25 credits then paid). Config is provider-neutral: `LLM_PROVIDER` / `LLM_API_KEY` / `LLM_MODEL`. | Yes — that's the point of D8 |
 | **D11** | **Conversation history must be trimmed** (Block 4), not left unbounded | Groq's free tier caps ~**14,400 tokens/minute**. Per C10, a 40-turn conversation is ~40K tokens in *one* request — over the entire per-minute budget. **A limit that makes you build it right beats unlimited quota that lets you build it wrong.** | No |
 | **D13** | **Model switched to `openai/gpt-oss-120b`** on Groq | Changed by editing **one line of `.env`** — zero code changes. Live proof that D3 + D8 work. | Yes — one line |
+| **D54** | **The UI fetches artifacts itself and renders them inline** | The model writes markdown image syntax for a file it created, and that breaks twice over: a relative path resolves to Streamlit rather than the API, and a browser `<img>` sends no `Authorization` header. The reply's own broken markup is stripped and the UI fetches the bytes with the session token instead. | Yes — a signed URL would let the browser fetch directly |
 | **D53** | **Tool arguments are never logged** | A model composes them from document text, which may be the user's private data. Logs outlive the request, are read by more people than the database, and ship to third-party aggregators. The tool *name*, outcome and duration are logged; the payload is not. There is a test asserting a calculation's operands do not appear in any log line. | No |
 | **D52** | **Cost is computed on every call even though the rate is zero** | Groq's free tier costs nothing, so `cost_usd` is always `0.0` today. Computing it anyway means the moment a paid provider is configured these lines become a cost report with no other change — and per-tenant cost tracking in v1.0 needs the history, which cannot be back-filled. | No |
 | **D51** | **structlog with JSON in production, console locally** | Logs are read by a machine first: grep is not a query language, and v1.0's dashboards need fields rather than prose. Locally a human reads them, so the renderer flips on one setting. Correlation is by context variable, not by passing an id through every signature. | Yes |
@@ -1195,6 +1196,29 @@ tier it is often most of the latency, and it is **not something our own code can
 improve**. Logging it separately keeps that distinction visible instead of
 hiding it inside one duration figure.
 
+### C106 — A reference the model writes is not a link the browser can follow
+The chart tool returns `Download it at /artifacts/<id>`, and the model helpfully
+turned that into markdown: `![Quarterly Revenue](/artifacts/<id>)`. The result
+was a **broken image icon**, for two separate reasons:
+
+1. The path is **relative**, so the browser resolved it against Streamlit on
+   port 8501 rather than the API on 8000
+2. Even absolute, an `<img>` tag sends **no `Authorization` header**, and the
+   endpoint correctly refuses anonymous requests
+
+Neither is the model's fault. It produced a reasonable rendering of a reference
+that was never fetchable by a browser in the first place.
+
+The fix has two halves: strip the model's own image markup from the displayed
+text, and have the **UI fetch the bytes with the session token** and render them
+itself. A signed, time-limited URL would let the browser fetch directly and is
+the better answer once the front end is React — but it trades an auth header for
+a credential in a URL, which lands in history and logs.
+
+**The general point: giving a model a capability is not the same as giving the
+user access to its output.** The tool worked perfectly and the feature was still
+broken.
+
 ---
 
 ## 📊 REFERENCE — LLM API pricing (2026-08-02)
@@ -1351,3 +1375,4 @@ Plus a module-name collision caught by mypy → C35 / D15.
 | 2026-11-01 | **v0.3 Blocks 2–4 — three generator tools.** An `ArtifactStore` (PostgreSQL, owned per user) plus `create_document` (fpdf2), `create_spreadsheet` (openpyxl) and `create_chart` (matplotlib). `ToolContext` added so a tool knows who it acts for. 97 tests. Verified live: one question produced a bar chart *and* a spreadsheet, the model choosing both tools in a single turn. Concepts C95–C98, decisions D45–D47 |
 | 2026-11-01 | **v0.3 Block 5 — background jobs.** Celery on Redis; upload stores the bytes, queues an id and returns **202** with a job id; the UI polls. Closes D36. Three bugs only a running worker exposed: `NotRegistered`, macOS fork safety, and an import-time `get_settings()` that broke the no-secrets-in-CI invariant. 104 tests. Measured: request 0.06s, work 26.8s. Concepts C99–C101, decisions D48–D50 |
 | 2026-11-01 | **v0.3 Block 6 — structured logging. BLOCK COMPLETE, v0.3 feature-complete.** structlog with JSON in production; request/user correlation by context variable; tokens, cost and provider queue time on every LLM call; outcome and duration on every tool call and job. Tool arguments deliberately never logged. 110 tests. Concepts C102–C105, decisions D51–D53 |
+| 2026-11-01 | **Fix — generated files now render inline.** Found while testing v0.3 by hand: the model wrapped the artifact reference in markdown image syntax and the browser showed a broken image. The UI now strips that markup, fetches the bytes with the session token, shows images inline and offers a download button for everything else. Concept C106, decision D54 |

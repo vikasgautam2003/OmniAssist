@@ -746,6 +746,8 @@ a sidebar PDF uploader with the list of indexed documents, and logout.
 - `render_chat()`, `render_sidebar()`, `render_welcome()` — the chat screen, document sidebar and empty state
 - `stream_reply()` — parses SSE frames from the backend
 - `upload_document()`, `fetch_documents()` — the document calls
+- `fetch_artifact()`, `render_artifacts()` — fetch a generated file with the session token and show it inline
+- `strip_broken_links()` — removes the model's own markdown image syntax, which cannot render
 - `start_session()`, `end_session()` — token in and out of `st.session_state`
 
 **Why** — a usable front end in Python while the API stabilises; React arrives

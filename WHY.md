@@ -1067,6 +1067,32 @@ Groq also reports `queue_time` separately, which is worth keeping distinct: on a
 free tier it is often most of the latency, and it is **not something our own
 code can improve**. Folding it into one duration figure would hide that.
 
+### A bug found by using it, not testing it
+
+Testing v0.3 by hand produced a **broken image icon** where a chart should have
+been. The tool had worked perfectly — the PNG existed, correctly drawn, in the
+artifact store. The failure was one layer further out.
+
+The tool returns `Download it at /artifacts/<id>`, and the model turned that
+into markdown: `![Quarterly Revenue](/artifacts/<id>)`. That breaks twice:
+
+1. The path is **relative**, so the browser resolved it against Streamlit on
+   port 8501 rather than the API on 8000
+2. Even absolute, an `<img>` tag sends **no `Authorization` header** — and the
+   endpoint correctly refuses anonymous requests
+
+Neither is the model's fault. It produced a reasonable rendering of a reference
+that was never fetchable by a browser.
+
+The UI now strips that markup and **fetches the bytes itself** with the session
+token, showing images inline and offering a download button for everything else.
+A signed, time-limited URL would let the browser fetch directly — better once
+the front end is React, but it trades an auth header for a credential in a URL,
+which lands in browser history and server logs.
+
+**The lesson: giving a model a capability is not the same as giving the user
+access to its output.** Every automated check passed; the feature was broken.
+
 ---
 
 ## Part 4 — Every file, and what it is for
