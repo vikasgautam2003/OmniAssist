@@ -23,6 +23,9 @@
 | **D10** | **v0.1 runs on Groq free tier — `llama-3.3-70b-versatile`** | Budget is $0. Groq = ~1,000 req/day, 30 RPM, **no credit card, ongoing**; Anthropic has no free tier. v0.1 needs ~200 requests total. ⚠️ **Groq ≠ Grok** — Groq is an inference provider serving open-weight models (free); Grok is xAI's model ($25 credits then paid). Config is provider-neutral: `LLM_PROVIDER` / `LLM_API_KEY` / `LLM_MODEL`. | Yes — that's the point of D8 |
 | **D11** | **Conversation history must be trimmed** (Block 4), not left unbounded | Groq's free tier caps ~**14,400 tokens/minute**. Per C10, a 40-turn conversation is ~40K tokens in *one* request — over the entire per-minute budget. **A limit that makes you build it right beats unlimited quota that lets you build it wrong.** | No |
 | **D13** | **Model switched to `openai/gpt-oss-120b`** on Groq | Changed by editing **one line of `.env`** — zero code changes. Live proof that D3 + D8 work. | Yes — one line |
+| **D50** | **The worker pool is chosen by platform: `solo` on macOS, `prefork` on Linux** | macOS restricts `fork()` once certain frameworks are initialised, and Celery's prefork children then start with an empty task registry. Every job fails with an unpacking error from inside billiard that looks like anything but a platform problem. Linux, where this deploys, keeps prefork and its concurrency. | Yes |
+| **D49** | **The upload is stored first and only an id is queued** | Putting megabytes through the broker would make Redis a file store, which it is not: payloads are held in memory and its durability guarantee is not worth betting a user's upload on. Storing first also means a worker restart loses nothing — the bytes are already safe. | No |
+| **D48** | **Indexing moves to a Celery worker; upload returns 202 with a job id — closes D36** | Embedding hundreds of passages held an API worker for the whole request. Measured after the change: the request returns in **0.06s** while the work still takes **26.8s**. The user is freed, the work is unchanged, and the server can serve others. | No — this is the point |
 | **D47** | **Generated files are stored in PostgreSQL, not on disk** | A container filesystem is ephemeral, which matters for v0.4's deployment, and bytes in a column cannot be reached by a path-traversal bug. Object storage is the right answer once files are large; the `ArtifactStore` protocol makes that a one-file change. | Yes — S3 in v0.4 |
 | **D46** | **A tool returns a reference, never the file** | Returning base64 would put megabytes into the conversation, which is then re-sent to the model on every later turn — paying for tokens it cannot read, and filling the context window that retrieval needs. The tool returns one line naming the file and a download path. | No — this is the shape |
 | **D45** | **`ToolContext` is passed by the service, never composed by the model** | The first side-effecting tool needs to know which user it is acting for. Identity cannot be one of the JSON arguments the model writes, because the model is an untrusted caller and an injected instruction could then claim to be someone else. Added to the protocol when the need appeared rather than guessed at in Block 1. | No |
@@ -34,7 +37,7 @@
 | **D39** | **The tool loop is bounded by `max_tool_iterations` (default 5)** | A model can call tools indefinitely — search, search again, search again — burning the token budget and hanging the request with no error. On exhaustion the model is told it may not call more tools, so it still produces an answer rather than the request dying. | Yes |
 | **D38** | **Tools are declared vendor-neutrally with JSON Schema; the client adapter translates** | Groq wants `{type: "function", function: {...}}`, Anthropic wants `{name, description, input_schema}`. Letting either shape reach the service layer would make swapping provider stop being a config change. Same rule as D8 (LLM client) and D27 (embedder), applied a third time. | No — this is the design |
 | **D37** | **Verify UI work by driving a real browser, not by reading the code** | Streamlit's own headless test harness reported no exception and every control present, yet the rendered page had three defects it could not see: an icon font overridden into literal text, an uploader whose only entry point was hidden, and an avatar value that crashed every assistant reply. Chrome over the DevTools Protocol was already on the machine and needed no install. | n/a — practice |
-| **D36** | **Indexing runs inside the request, with a 10 MB upload cap** | Embedding a few hundred passages blocks a worker for seconds. The correct answer is a background queue, which is v0.3's Celery work. Accepted knowingly: the size cap bounds the worst case, and the limitation is scheduled rather than unnoticed. | Yes — v0.3 moves it to a queue |
+| **D36** | ~~Indexing runs inside the request, with a 10 MB upload cap~~ **superseded by D48** | Embedding a few hundred passages blocks a worker for seconds. The correct answer is a background queue, which is v0.3's Celery work. Accepted knowingly: the size cap bounds the worst case, and the limitation is scheduled rather than unnoticed. | Yes — v0.3 moves it to a queue |
 | **D35** | **Re-uploading a document replaces its passages rather than appending** | Appending stores every passage twice, so retrieval spends half its context budget repeating itself and the model sounds more confident for having seen the same text twice. Replace is also what a user means by "upload it again". | Yes |
 | **D34** | **Full roadmap retained — v0.3, v0.4 and v1.0 all built, no scope cut** | Measured pace is ~1.3 working days/week (8 active days across 42), which puts the full roadmap around April–June 2027 rather than December. Trimming the shallow generators (video, image, CSV export) and deferring React would have cost ~10 working days instead of ~24. Decision taken knowingly: the complete system is the goal, and the timeline moves instead of the scope. | Yes — revisit if December matters |
 | **D33** | **Update a branch by pulling locally (`git pull --rebase`), never with GitHub's "Update branch" button** | The button merges server-side and, when it cannot merge cleanly, picks a side instead of stopping. It discarded five files' worth of work and the pull request then squashed *that* commit, leaving `main` unable to import. A local pull puts the conflict in front of you. | Yes — but the cost of getting it wrong is a broken `main` |
@@ -1066,6 +1069,62 @@ garbage collected. A server drawing charts all day leaks until it dies. There
 is a test asserting `plt.get_fignums() == []` after twelve charts, because this
 is invisible until production.
 
+### C99 — A queue does not make the work faster, it makes the wait someone else's problem
+Measured across the change, on the same document:
+
+| | Before | After |
+|---|---|---|
+| Request returns in | ~27s | **0.06s** |
+| Work takes | 27s | 27s |
+
+**Nothing got faster.** What changed is who waits. The API worker is free
+immediately and can serve other requests; the user gets a job id and a progress
+indicator instead of a frozen spinner with no way to know whether anything is
+happening.
+
+That is the honest framing of every queue, and it is worth saying plainly rather
+than implying a performance win that did not occur.
+
+### C100 — Three bugs a running worker found that no test could
+**1. `NotRegistered`.** The worker imports the module holding the Celery app,
+not the module holding the tasks — so nothing was registered and every job
+failed by name. Fixed with `include=["app.jobs.indexing"]`.
+
+**2. macOS fork safety.** The default prefork pool produced
+`ValueError: not enough values to unpack (expected 3, got 0)` from inside
+billiard. The real cause is that macOS restricts `fork()` after certain
+frameworks initialise, so the child starts with an empty task registry. Nothing
+in that error names the platform.
+
+**3. An import-time side effect I had just written a comment denying.**
+`celery_app = build_celery()` called `get_settings()` at import, so **the test
+suite stopped running without `.env`** — breaking the invariant the entire
+interface design exists to protect (D5). The comment directly above it claimed
+the opposite.
+
+The lesson is the same as the Streamlit UI defects: **some classes of bug are
+only reachable by running the real thing.** A worker process, like a browser, is
+a different execution environment, and unit tests do not enter it.
+
+### C101 — Keep the work out of the task decorator
+```python
+def index_uploaded_document(user_id, artifact_id) -> dict:   # plain function
+    ...
+
+@celery_app.task(name="index_uploaded_document")
+def index_uploaded_document_task(user_id: str, artifact_id: str) -> dict:
+    return index_uploaded_document(UUID(user_id), UUID(artifact_id))
+```
+
+The decorated function does two things: parse strings into UUIDs, and delegate.
+Everything else is an ordinary function, so the behaviour is tested **with no
+broker, no worker and no Redis running at all** — four tests that execute in
+milliseconds.
+
+The wrapper also marks the trust boundary. Task arguments travel through a
+broker and arrive as JSON, so the job re-checks ownership rather than assuming
+the enqueuing request already did.
+
 ---
 
 ## 📊 REFERENCE — LLM API pricing (2026-08-02)
@@ -1220,3 +1279,4 @@ Plus a module-name collision caught by mypy → C35 / D15.
 | 2026-11-01 | **Documentation rule made absolute (D43).** `WHY.md` written covering v0.1-v0.3: per block, the problem, what was built, what was rejected and why, what the architecture gained, what it cost — plus a chapter on the four shipped defects and the questions an interviewer asks. `FILE_GUIDE.md` gains a **Contains** block for all 28 modules listing their functions and classes. README corrected: it still claimed v0.1 and omitted PostgreSQL and migrations |
 | 2026-11-01 | **v0.3 Block 1 — tool-use framework.** `Tool` protocol, `ToolRegistry` that never raises, `Calculator` with an AST whitelist, tool-aware streaming in the Groq adapter, and the bounded loop in `ChatService`. D40 superseded by D44 during implementation. 79 tests; verified against the live Groq API — the model called the tool and returned the correct product of two five-digit numbers. Concepts C91–C94, decision D44 |
 | 2026-11-01 | **v0.3 Blocks 2–4 — three generator tools.** An `ArtifactStore` (PostgreSQL, owned per user) plus `create_document` (fpdf2), `create_spreadsheet` (openpyxl) and `create_chart` (matplotlib). `ToolContext` added so a tool knows who it acts for. 97 tests. Verified live: one question produced a bar chart *and* a spreadsheet, the model choosing both tools in a single turn. Concepts C95–C98, decisions D45–D47 |
+| 2026-11-01 | **v0.3 Block 5 — background jobs.** Celery on Redis; upload stores the bytes, queues an id and returns **202** with a job id; the UI polls. Closes D36. Three bugs only a running worker exposed: `NotRegistered`, macOS fork safety, and an import-time `get_settings()` that broke the no-secrets-in-CI invariant. 104 tests. Measured: request 0.06s, work 26.8s. Concepts C99–C101, decisions D48–D50 |

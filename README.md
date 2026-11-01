@@ -2,7 +2,7 @@
 
 A streaming AI assistant built as a **production engineering exercise** — one codebase evolved release by release, with the operational discipline each stage actually requires.
 
-**v0.2** — accounts, persistent history, and questions answered from your own uploaded PDFs. Streaming throughout, behind provider-agnostic LLM and embedding layers.
+**v0.3** — the assistant now *does* things: it decides when to call tools, and can write PDFs, spreadsheets and charts you download. Built on v0.2's accounts, persistent history and retrieval over your own uploaded PDFs.
 
 ---
 
@@ -44,6 +44,7 @@ The UI never holds an API key: it calls this backend, which calls the provider. 
 **Prerequisites**
 
 - [uv](https://docs.astral.sh/uv/)
+- **Redis** (`brew install redis && brew services start redis`) — the job queue
 - **PostgreSQL 17+ with the [pgvector](https://github.com/pgvector/pgvector) extension** — the migration enables the extension, but the binary must already be installed (`brew install pgvector`)
 - A free API key from [console.groq.com](https://console.groq.com)
 
@@ -68,7 +69,12 @@ uv run uvicorn app.main:app --reload --port 8000
 ```
 
 ```bash
-# terminal 2 — the interface
+# terminal 2 — the background worker (indexing runs here, not in the request)
+uv run celery -A app.jobs.celery_app:celery_app worker --loglevel=info
+```
+
+```bash
+# terminal 3 — the interface
 uv run streamlit run ui/streamlit_app.py
 ```
 

@@ -490,7 +490,7 @@ be revised after every block.
 | 2 | Document generation (PDF) as a tool | ✅ |
 | 3 | Spreadsheet generation (Excel) as a tool | ✅ |
 | 4 | Charts as a tool | ✅ |
-| 5 | Background jobs — Celery + Redis; moves indexing out of the request (D36) | ⬜ |
+| 5 | Background jobs — Celery + Redis; moves indexing out of the request (D36) | ✅ |
 | 6 | Structured logging — latency, tokens and cost per request | ⬜ |
 
 **Decisions already taken (D38–D42):** tools declared vendor-neutrally in JSON
@@ -586,6 +586,58 @@ uv run pytest                       # 97 tests
 ```
 Live: one question produced a bar chart *and* a spreadsheet, the model choosing
 both tools in a single turn.
+
+---
+
+### Block 5 — background jobs ✅
+
+**Why after the tools, not before:** a queue only matters once something slow
+exists to put in it. Indexing was the slow thing all along, but building the
+queue first would have meant designing it against a guess.
+
+**Files**
+
+| File | Purpose |
+|---|---|
+| `app/jobs/celery_app.py` | the Celery app; broker, serialisation, pool |
+| `app/jobs/indexing.py` | the work as a **plain function**, plus a thin task wrapper |
+| `app/routes/documents.py` | upload now returns **202 + job id**; `/documents/jobs/{id}` |
+| `ui/streamlit_app.py` | polls the job instead of holding the request |
+| `app/config.py` | `redis_url` |
+
+**Measured**
+
+| | Before | After |
+|---|---|---|
+| Request returns in | ~27s | **0.06s** |
+| Work takes | 27s | 27s |
+
+Nothing got faster — the *wait* moved. Worth stating plainly.
+
+**Key points**
+- The upload is **stored first and only an id is queued**: Redis holds payloads
+  in memory and is not a file store
+- The work is a plain function; the task decorator only parses UUIDs and
+  delegates, so four tests run it with no broker and no Redis
+- The job **re-checks ownership**: task arguments travel through a broker and
+  must not be trusted more than a request
+- `task_acks_late=True` — a worker killed mid-task would otherwise lose the job
+
+**Three bugs only a running worker found**
+1. `NotRegistered` — the worker imports the app module, not the tasks module;
+   fixed with `include=[...]`
+2. macOS fork safety — prefork children start with an empty registry; pool is
+   now chosen by platform
+3. An **import-time `get_settings()`** that stopped the suite running without
+   `.env`, breaking the invariant from D5 — with a comment above it claiming
+   the opposite
+
+**Verify**
+```bash
+brew services start redis
+uv run celery -A app.jobs.celery_app:celery_app worker --loglevel=info
+uv run pytest        # 104 tests, and still green with no .env
+```
 
 ---
 

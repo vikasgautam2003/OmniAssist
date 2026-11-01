@@ -919,6 +919,80 @@ collected. A server drawing charts all day leaks until it dies. There is a test
 asserting no figures remain after twelve charts — invisible until production
 otherwise.
 
+### Block 5 — moving the work off the request
+
+**Why now and not earlier.** A queue only matters once something slow exists to
+put in it. Indexing was always the slow thing, but building the queue first
+would have meant designing it against a guess.
+
+**What changed, measured on the same document:**
+
+| | Before | After |
+|---|---|---|
+| Request returns in | ~27s | **0.06s** |
+| Work takes | 27s | 27s |
+
+**Nothing got faster.** That is worth saying plainly, because it is easy to
+imply a performance win that did not happen. What changed is *who waits*: the
+API worker is free immediately and can serve other requests, and the user gets a
+job id and a progress indicator instead of a frozen spinner.
+
+This closes **D36**, which recorded synchronous indexing as a knowing compromise
+with a scheduled fix. Having written that down made this block an obligation
+rather than a nice idea.
+
+#### Why the bytes are stored before the job is queued
+
+The obvious design sends the file to the worker through the broker. Redis holds
+payloads **in memory** and is a message broker, not a file store — a 10 MB
+upload per queued job is memory pressure on a service whose durability guarantee
+is not worth betting a user's upload on.
+
+So the upload is written to the artifact store first and only an **id** is
+queued. A side benefit: a worker restart loses nothing, because the bytes were
+already safe before the job existed.
+
+#### Why the work is not in the task decorator
+
+```python
+def index_uploaded_document(user_id, artifact_id) -> dict:   # plain function
+    ...
+
+@celery_app.task(name="index_uploaded_document")
+def index_uploaded_document_task(user_id: str, artifact_id: str) -> dict:
+    return index_uploaded_document(UUID(user_id), UUID(artifact_id))
+```
+
+The decorated function parses strings into UUIDs and delegates. Everything else
+is ordinary Python, so four tests exercise the behaviour **with no broker, no
+worker and no Redis**.
+
+The wrapper is also the trust boundary. Task arguments travel through a broker
+and arrive as JSON, so the job **re-checks ownership** rather than assuming the
+request that enqueued it already did.
+
+#### Three bugs that only a running worker could find
+
+**`NotRegistered`.** The worker imports the module holding the Celery app, not
+the module holding the tasks. Nothing was registered; every job failed by name.
+
+**macOS fork safety.** The default prefork pool produced
+`ValueError: not enough values to unpack (expected 3, got 0)` from deep inside
+billiard. The real cause is that macOS restricts `fork()` after certain
+frameworks initialise, so the child process starts with an empty task registry.
+Nothing in that error mentions the platform.
+
+**An import-time side effect, with a comment denying it.** I wrote
+`celery_app = build_celery()` at module level — which called `get_settings()` —
+directly below a docstring explaining that a function was used *"so that
+importing this module needs no configuration"*. The test suite stopped running
+without `.env`, breaking the invariant the entire interface design exists to
+protect.
+
+All three are the same lesson as the Streamlit defects in Part 5: **a worker
+process, like a browser, is a different execution environment, and unit tests do
+not enter it.**
+
 ---
 
 ## Part 4 — Every file, and what it is for

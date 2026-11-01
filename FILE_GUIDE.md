@@ -537,6 +537,35 @@ dropped 32 of 45 characters with no error at all.
 
 ## HTTP layer
 
+### `app/jobs/celery_app.py`
+**Is** — the Celery application: broker, serialisation and worker settings.
+
+**Contains**
+
+- `celery_app` — the instance the worker is started against
+- `DEFAULT_REDIS_URL` — shared with `Settings.redis_url` so the two cannot drift
+- `broker_url` — read from the environment, **not** through `Settings`
+
+**Why** — Celery binds its broker when this module is imported, before any
+`.env` is required. Reading `Settings` here would mean importing the app needs
+secrets, which breaks the invariant that lets CI run without them. `include`
+names the tasks module, because the worker imports *this* file and would
+otherwise register nothing. The pool is chosen by platform: macOS restricts
+`fork()` and prefork children start with an empty registry.
+
+### `app/jobs/indexing.py`
+**Is** — indexing as a background job.
+
+**Contains**
+
+- `index_uploaded_document()` — the work, as an ordinary function
+- `index_uploaded_document_task()` — the Celery wrapper: parses UUIDs, delegates
+
+**Why** — keeping the work out of the decorator means it is tested with no
+broker, no worker and no Redis. The wrapper is also the trust boundary: task
+arguments arrive through a broker as JSON, so the job re-checks ownership rather
+than assuming the request that enqueued it did.
+
 ### `app/routes/chat.py`
 **Is** — the chat endpoint, streaming replies over Server-Sent Events.
 
@@ -571,7 +600,8 @@ unknown so response time does not reveal whether an account exists.
 
 **Contains**
 
-- `upload()` — `POST /documents` — size-checked, indexed, 201 with a passage count
+- `upload()` — `POST /documents` — size-checked, stored, queued; **202** with a job id
+- `job_status()` — `GET /documents/jobs/{id}` — the state of a queued job
 - `list_documents()` — `GET /documents` — the names indexed for this user
 - `get_indexer()` — builds the indexer once per process
 - `UploadResponse` — the response body
@@ -837,5 +867,5 @@ This document.
 
 ---
 
-*Updated through v0.3 Blocks 1–4 (framework and three generator tools). Revise when
+*Updated through v0.3 Block 5 (background jobs). Revise when
 files are added, removed, or change purpose.*
