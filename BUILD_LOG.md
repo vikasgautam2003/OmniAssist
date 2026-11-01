@@ -13,7 +13,7 @@
 |---|---|---|
 | **v0.1** | Streaming chatbot with history | ✅ **shipped** |
 | **v0.2** | Postgres, auth, PDF upload + RAG, pytest | ✅ **shipped** `v0.2` |
-| v0.3 | Tool-use framework, Redis cache, Celery jobs, structured logging | 🔄 design done |
+| **v0.3** | Tool-use framework, Celery jobs, structured logging | ✅ **feature-complete** |
 | v0.4 | Multi-tenancy, RBAC, Docker, AWS deploy, CD | ⬜ |
 | v1.0 | Monitoring, alerting, LLM evals, load testing, cost tracking | ⬜ |
 
@@ -476,14 +476,22 @@ each change the shape of code in three layers at once.
 code. After Block 1 it is a new *tool*, which is why blocks 2–4 are hours each
 rather than days.
 
+**Why this order.** Block 1 first because everything after it is a *tool*, and
+a tool cannot exist before the thing that runs tools. Blocks 2–4 next, because
+each is small once the framework exists and together they prove the claim that
+capabilities became cheap. Block 5 (queue) after the tools, because the queue
+only matters once something slow exists to put in it. Block 6 (logging) last,
+because it instruments everything before it — written earlier, it would have to
+be revised after every block.
+
 | # | Block | Status |
 |---|-------|--------|
-| 1 | Tool-use framework: `Tool` protocol, registry, bounded loop, `Message` refactor | ⬜ |
-| 2 | Document generation (PDF) as a tool | ⬜ |
-| 3 | Spreadsheet generation (CSV / Excel) as a tool | ⬜ |
-| 4 | Charts and data analysis as a tool | ⬜ |
-| 5 | Background jobs — Celery + Redis; moves indexing out of the request (D36) | ⬜ |
-| 6 | Structured logging — latency, tokens and cost per request | ⬜ |
+| 1 | Tool-use framework: `Tool` protocol, registry, bounded loop, `Message` refactor | ✅ |
+| 2 | Document generation (PDF) as a tool | ✅ |
+| 3 | Spreadsheet generation (Excel) as a tool | ✅ |
+| 4 | Charts as a tool | ✅ |
+| 5 | Background jobs — Celery + Redis; moves indexing out of the request (D36) | ✅ |
+| 6 | Structured logging — latency, tokens and cost per request | ✅ |
 
 **Decisions already taken (D38–D42):** tools declared vendor-neutrally in JSON
 Schema with the adapter translating · the loop bounded by `max_tool_iterations`
@@ -491,6 +499,192 @@ Schema with the adapter translating · the loop bounded by `max_tool_iterations`
 becomes a dataclass carrying tool fields · **no tool with side effects in Block
 1**, because a tool catalogue turns prompt injection from speech into action
 (C90).
+
+---
+
+### Block 1 — the framework ✅
+
+**Why first:** every later capability is a tool, and a tool cannot exist before
+the thing that runs tools. Done in two commits on purpose — the `Message`
+refactor has no behaviour change, so if the loop misbehaves later `git bisect`
+can tell the two apart.
+
+**Files**
+
+| File | Purpose |
+|---|---|
+| `app/tools/base.py` | `Tool` protocol, `ToolSpec`, `ToolError` |
+| `app/tools/registry.py` | name → tool; runs calls and **never raises** |
+| `app/tools/calculator.py` | the first tool — pure, AST-whitelisted |
+| `app/clients/base.py` | `StreamEvent`; `stream_chat` takes a catalogue |
+| `app/clients/groq_client.py` | `tool_to_wire()` + tool-call accumulation |
+| `app/services/chat.py` | the bounded loop (`_stream`, `_turn`) |
+| `app/domain.py` | `Message` dataclass + `ToolCall` (earlier commit) |
+
+**Key points**
+- **D40 superseded by D44 during implementation.** Streaming and tool detection
+  happen in one pass: ending the loop leaves you holding the final text, so
+  "stream it afterwards" means regenerating it or faking it
+- Providers send tool calls **in fragments keyed by `index`** — id and name
+  first, arguments a few characters at a time. One accumulator reassembles them
+- `ToolRegistry.run()` **never raises**: a bad tool call is the model's problem
+  to recover from, not a 500 for a user who did nothing wrong
+- The calculator **parses to an AST and whitelists node types**. `eval()` would
+  be remote code execution, and the input can come from an uploaded PDF
+- `2 ** 10_000_000` is plain arithmetic that hangs the process — the exponent is
+  capped, which is cheaper than a timeout
+- The loop is bounded by `max_tool_iterations`; on exhaustion the model is told
+  to stop, so the user gets an answer rather than a request that dies
+
+**Verify**
+```bash
+uv run pytest                      # 79 tests
+# live: the model calls the tool and uses the result
+uv run python -c "..."             # 48271 * 9183 -> 443272593 ✓
+```
+
+---
+
+### Blocks 2–4 — three generator tools ✅
+
+**Why together:** they exist to *prove* the framework's claim. If adding a
+capability is still expensive, Block 1 did not work. Built in one sitting, which
+is the evidence.
+
+**Why Block 2 carries the shared piece.** All three produce files, and a tool
+returns a string — so the artifact store had to exist before the first of them.
+Built once in Block 2; Blocks 3 and 4 reuse it unchanged.
+
+**Files**
+
+| File | Purpose |
+|---|---|
+| `app/artifacts/{base,postgres,memory}.py` | `ArtifactStore` protocol and implementations |
+| `app/db/models.py` | `ArtifactRow` + migration `409f9e6d475e` |
+| `app/tools/artifacts.py` | `safe_filename()`, `store()`, `rows_from()` — shared by all three |
+| `app/tools/documents.py` | `create_document` (fpdf2) |
+| `app/tools/spreadsheets.py` | `create_spreadsheet` (openpyxl) |
+| `app/tools/charts.py` | `create_chart` (matplotlib) |
+| `app/routes/artifacts.py` | `GET /artifacts/{id}`, scoped to the owner |
+| `app/tools/base.py` | `ToolContext` added to the protocol |
+
+**Key points**
+- **The bytes never enter the conversation.** Base64 would be re-sent to the
+  model every later turn — roughly 70k tokens for a 200 KB PDF it cannot read
+- **`ToolContext` is passed by the service, never by the model.** Identity
+  cannot be a JSON argument the model composes
+- Artifacts live in **PostgreSQL**: a container filesystem is ephemeral, and
+  bytes in a column cannot be path-traversed. S3 in v0.4 is one file
+- Three outputs, three injections: spreadsheet **formulas** (`=`), filename
+  **header injection**, PDF **latin-1** limits
+- `matplotlib.use("Agg")` before importing pyplot, and `plt.close()` in a
+  `finally` — pyplot holds every figure until closed
+
+**Verify**
+```bash
+uv run pytest                       # 97 tests
+```
+Live: one question produced a bar chart *and* a spreadsheet, the model choosing
+both tools in a single turn.
+
+---
+
+### Block 5 — background jobs ✅
+
+**Why after the tools, not before:** a queue only matters once something slow
+exists to put in it. Indexing was the slow thing all along, but building the
+queue first would have meant designing it against a guess.
+
+**Files**
+
+| File | Purpose |
+|---|---|
+| `app/jobs/celery_app.py` | the Celery app; broker, serialisation, pool |
+| `app/jobs/indexing.py` | the work as a **plain function**, plus a thin task wrapper |
+| `app/routes/documents.py` | upload now returns **202 + job id**; `/documents/jobs/{id}` |
+| `ui/streamlit_app.py` | polls the job instead of holding the request |
+| `app/config.py` | `redis_url` |
+
+**Measured**
+
+| | Before | After |
+|---|---|---|
+| Request returns in | ~27s | **0.06s** |
+| Work takes | 27s | 27s |
+
+Nothing got faster — the *wait* moved. Worth stating plainly.
+
+**Key points**
+- The upload is **stored first and only an id is queued**: Redis holds payloads
+  in memory and is not a file store
+- The work is a plain function; the task decorator only parses UUIDs and
+  delegates, so four tests run it with no broker and no Redis
+- The job **re-checks ownership**: task arguments travel through a broker and
+  must not be trusted more than a request
+- `task_acks_late=True` — a worker killed mid-task would otherwise lose the job
+
+**Three bugs only a running worker found**
+1. `NotRegistered` — the worker imports the app module, not the tasks module;
+   fixed with `include=[...]`
+2. macOS fork safety — prefork children start with an empty registry; pool is
+   now chosen by platform
+3. An **import-time `get_settings()`** that stopped the suite running without
+   `.env`, breaking the invariant from D5 — with a comment above it claiming
+   the opposite
+
+**Verify**
+```bash
+brew services start redis
+uv run celery -A app.jobs.celery_app:celery_app worker --loglevel=info
+uv run pytest        # 104 tests, and still green with no .env
+```
+
+---
+
+### Block 6 — structured logging ✅ — v0.3 complete
+
+**Why last:** it instruments everything before it. Written earlier it would
+have been revised after every block, and the fields worth logging were not
+knowable until the tools and the queue existed.
+
+**Files**
+
+| File | Purpose |
+|---|---|
+| `app/observability/logging.py` | structlog config, `new_request()`, `bind()` |
+| `app/observability/middleware.py` | per-request log line + `X-Request-ID` |
+| `app/clients/groq_client.py` | tokens, cost, duration, provider queue time |
+| `app/tools/registry.py` | tool name, outcome, duration — **never arguments** |
+| `app/jobs/indexing.py` | its own correlation scope; outcome and duration |
+
+**What one question now produces**
+
+```
+llm.call   prompt_tokens=178 completion_tokens=48 duration_ms=595.8
+           provider_queue_ms=49.7 tools_requested=true
+tool.call  tool=calculate outcome=ok duration_ms=0.2
+llm.call   prompt_tokens=209 completion_tokens=26 duration_ms=362.8
+           provider_queue_ms=210.8 tools_requested=false
+```
+
+All three share one `request_id` and `user_id`, bound once by context variable
+rather than threaded through every signature.
+
+**Key points**
+- **Cost is computed although the rate is zero.** The field exists so token
+  counts become money the moment a paid provider is configured, and v1.0 needs
+  the history, which cannot be back-filled
+- **Tool arguments are never logged** — a model composes them from document
+  text, which may be private. There is a test asserting it
+- `/healthz` is quiet: 8,640 lines a day saying nothing is a log nobody skims
+- Groq attaches `usage` to the final chunk **by default**; OpenAI needs
+  `stream_options`. That difference lives in the adapter, like every other one
+- A **job starts its own correlation scope** — it has no request to inherit
+
+**Verify**
+```bash
+uv run pytest           # 110 tests, green with no key, no database, no Redis
+```
 
 ---
 

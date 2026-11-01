@@ -6,6 +6,7 @@ import pytest
 from app.repositories.memory import InMemoryConversationRepository
 from app.services.chat import ChatService
 from app.services.retrieval import Retriever
+from app.tools.registry import ToolRegistry
 from tests.fakes import FakeLLMClient
 
 ServiceFactory = Callable[..., tuple[ChatService, FakeLLMClient]]
@@ -33,10 +34,18 @@ def make_service() -> ServiceFactory:
         reply: str = "reply",
         max_history: int = 10,
         retriever: Retriever | None = None,
+        tools: ToolRegistry | None = None,
+        tool_calls: object = (),
+        max_tool_iterations: int = 5,
     ) -> tuple[ChatService, FakeLLMClient]:
-        fake = FakeLLMClient(reply)
+        fake = FakeLLMClient(reply, tool_calls=tool_calls)  # type: ignore[arg-type]
         service = ChatService(
-            fake, InMemoryConversationRepository(), max_history, retriever=retriever
+            fake,
+            InMemoryConversationRepository(),
+            max_history,
+            retriever=retriever,
+            tools=tools,
+            max_tool_iterations=max_tool_iterations,
         )
         return service, fake
 

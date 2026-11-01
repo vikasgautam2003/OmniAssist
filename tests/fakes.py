@@ -1,28 +1,49 @@
 import hashlib
 import math
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 
-from app.domain import Message
+from app.clients.base import StreamEvent
+from app.domain import Message, ToolCall
+from app.tools.base import ToolSpec
 
 
 class FakeLLMClient:
-    def __init__(self, reply: str = "fake reply") -> None:
+    """A scriptable stand-in for a provider.
+
+    `replies` is consumed one entry per model turn, so a test can script
+    "call this tool, then answer" without a network or a key.
+    """
+
+    def __init__(
+        self,
+        reply: str = "fake reply",
+        tool_calls: Sequence[Sequence[ToolCall]] = (),
+    ) -> None:
         self.reply = reply
         self.calls: list[list[Message]] = []
+        self.tools_offered: list[list[ToolSpec]] = []
+        self._scripted = [tuple(batch) for batch in tool_calls]
+        self._turn = 0
 
-    def chat(self, messages: list[Message]) -> str:
-        self.calls.append(messages)
-        return self.reply
+    def stream_chat(
+        self, messages: list[Message], tools: Sequence[ToolSpec] = ()
+    ) -> Iterator[StreamEvent]:
+        # Recorded eagerly: the caller must be able to assert what was sent
+        # even if the stream is never consumed.
+        self.calls.append(list(messages))
+        self.tools_offered.append(list(tools))
+        turn = self._turn
+        self._turn += 1
+        return self._stream(turn)
 
-    def stream_chat(self, messages: list[Message]) -> Iterator[str]:
-        self.calls.append(messages)
-        return self._stream()
+    def _stream(self, turn: int) -> Iterator[StreamEvent]:
+        if turn < len(self._scripted):
+            yield StreamEvent(tool_calls=self._scripted[turn])
+            return
 
-    def _stream(self) -> Iterator[str]:
         size = 4
-
         for i in range(0, len(self.reply), size):
-            yield self.reply[i : i + size]
+            yield StreamEvent(text=self.reply[i : i + size])
 
 
 def make_pdf(text: str) -> bytes:

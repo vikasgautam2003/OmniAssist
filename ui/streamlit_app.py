@@ -1,4 +1,5 @@
 import json
+import time
 import uuid
 from collections.abc import Iterator
 
@@ -8,6 +9,9 @@ import styles
 
 API_URL = "http://localhost:8000"
 MIN_PASSWORD_LENGTH = 12
+
+POLL_ATTEMPTS = 60
+POLL_SECONDS = 2.0
 
 SUGGESTIONS = (
     "Summarise my document",
@@ -121,13 +125,17 @@ def stream_reply(user_message: str) -> Iterator[str]:
 
 
 def upload_document(name: str, data: bytes) -> None:
-    """Send a PDF to be indexed, and report the outcome in the sidebar."""
+    """Queue a PDF for indexing, then wait for the job to finish.
+
+    The request returns straight away with a job id; the waiting happens here
+    so a slow document cannot hold an API worker open.
+    """
     try:
         response = httpx.post(
             f"{API_URL}/documents",
             headers={"Authorization": f"Bearer {st.session_state.token}"},
             files={"file": (name, data, "application/pdf")},
-            timeout=180.0,
+            timeout=60.0,
         )
     except httpx.HTTPError:
         st.sidebar.error("Could not reach the server.")
@@ -138,13 +146,46 @@ def upload_document(name: str, data: bytes) -> None:
         return
 
     if response.status_code >= 400:
-        # 400 carries a message written for the user -- "this needs OCR" --
-        # so showing it is more useful than a generic failure.
         st.sidebar.error(response.json().get("detail", "Upload failed."))
         return
 
-    passages = response.json()["passages"]
-    st.sidebar.success(f"Indexed {name} into {passages} passages.")
+    _await_indexing(response.json()["job_id"], name)
+
+
+def _await_indexing(job_id: str, name: str) -> None:
+    headers = {"Authorization": f"Bearer {st.session_state.token}"}
+
+    for _ in range(POLL_ATTEMPTS):
+        try:
+            status = httpx.get(
+                f"{API_URL}/documents/jobs/{job_id}", headers=headers, timeout=10.0
+            ).json()
+        except httpx.HTTPError:
+            st.sidebar.error("Could not reach the server.")
+            return
+
+        if status["state"] == "SUCCESS":
+            result = status.get("result") or {}
+
+            if result.get("status") == "failed":
+                # The message was written for the user -- "this needs OCR" --
+                # so it is more useful than a generic failure.
+                st.sidebar.error(result.get("error", "Indexing failed."))
+            else:
+                st.sidebar.success(
+                    f"Indexed {name} into {result.get('passages', 0)} passages."
+                )
+            return
+
+        if status["state"] == "FAILURE":
+            st.sidebar.error("Indexing failed.")
+            return
+
+        time.sleep(POLL_SECONDS)
+
+    st.sidebar.warning(
+        f"{name} is still indexing. It will appear once the worker finishes."
+    )
 
 
 def fetch_documents() -> list[str]:

@@ -4,6 +4,8 @@ from typing import Literal
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.jobs.celery_app import DEFAULT_REDIS_URL
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -28,6 +30,17 @@ class Settings(BaseSettings):
     embedding_provider: Literal["local", "gemini"] = "local"
     retrieval_top_k: int = 4
     max_upload_bytes: int = 10_000_000
+    max_tool_iterations: int = 5
+
+    redis_url: str = DEFAULT_REDIS_URL
+
+    # JSON locally too would be unreadable; machines read it in production.
+    log_json: bool = False
+    # Groq's free tier costs nothing, so these default to zero -- but the
+    # field exists so token counts can become money the moment a paid
+    # provider is configured, which is what v1.0's per-tenant tracking needs.
+    cost_per_million_input_tokens: float = 0.0
+    cost_per_million_output_tokens: float = 0.0
 
     app_env: Literal["local", "staging", "production"] = "local"
 

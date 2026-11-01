@@ -1,10 +1,17 @@
 import uuid
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator, Sequence
 
 from app.clients.base import LLMClient
-from app.domain import Chunk, Message
+from app.domain import Chunk, Message, ToolCall
 from app.repositories.base import ConversationRepository
 from app.services.retrieval import Retriever
+from app.tools.base import ToolContext, ToolSpec
+from app.tools.registry import ToolRegistry
+
+NO_MORE_TOOLS = (
+    "You have reached the limit on tool calls for this question. "
+    "Answer now with what you already know."
+)
 
 GROUNDING = """Answer the question using the passages below when they are relevant.
 If the passages do not contain the answer, say so plainly rather than guessing.
@@ -28,11 +35,15 @@ class ChatService:
         repository: ConversationRepository,
         max_history: int = 10,
         retriever: Retriever | None = None,
+        tools: ToolRegistry | None = None,
+        max_tool_iterations: int = 5,
     ) -> None:
         self._client = client
         self._repository = repository
         self._max_history = max_history
         self._retriever = retriever
+        self._tools = tools or ToolRegistry()
+        self._max_tool_iterations = max_tool_iterations
 
     def stream_reply(
         self, conversation_id: str, user_id: uuid.UUID, user_message: str
@@ -47,7 +58,7 @@ class ChatService:
         self._repository.add_message(
             conversation_id,
             user_id,
-            {"role": "user", "content": user_message},
+            Message(role="user", content=user_message),
         )
 
         trimmed = self._repository.get_history(
@@ -81,26 +92,71 @@ class ChatService:
         if not chunks:
             return history
 
-        grounding: Message = {
-            "role": "system",
-            "content": GROUNDING.format(passages=_format_passages(chunks)),
-        }
+        grounding = Message(
+            role="system",
+            content=GROUNDING.format(passages=_format_passages(chunks)),
+        )
         return [grounding, *history]
 
     def _stream(
         self, conversation_id: str, user_id: uuid.UUID, trimmed: list[Message]
     ) -> Iterator[str]:
+        """Stream the reply, running any tools the model asks for.
+
+        Bounded on purpose. A model can keep calling tools -- search, search
+        again, search again -- and unbounded that burns the token budget and
+        hangs the request with no error at all.
+        """
+        working = list(trimmed)
+        catalogue = self._tools.catalogue()
+
+        for _ in range(self._max_tool_iterations):
+            assistant, calls = yield from self._turn(
+                conversation_id, user_id, working, catalogue
+            )
+            working.append(assistant)
+
+            if not calls:
+                return
+
+            for call in calls:
+                # The registry never raises: a failing tool becomes text the
+                # model can read and recover from, not a 500 for the user.
+                result = Message(
+                    role="tool",
+                    content=self._tools.run(call, ToolContext(user_id=user_id)),
+                    tool_call_id=call.id,
+                )
+                self._repository.add_message(conversation_id, user_id, result)
+                working.append(result)
+
+        # Out of iterations. Tell the model to stop and answer, so the user
+        # gets a reply rather than a request that simply dies.
+        working.append(Message(role="system", content=NO_MORE_TOOLS))
+        yield from self._turn(conversation_id, user_id, working, ())
+
+    def _turn(
+        self,
+        conversation_id: str,
+        user_id: uuid.UUID,
+        working: list[Message],
+        catalogue: Sequence[ToolSpec],
+    ) -> Generator[str, None, tuple[Message, tuple[ToolCall, ...]]]:
+        """One exchange with the model: stream its text, collect its tool calls."""
         pieces: list[str] = []
+        calls: tuple[ToolCall, ...] = ()
 
-        for chunk in self._client.stream_chat(trimmed):
-            pieces.append(chunk)
-            yield chunk
+        for event in self._client.stream_chat(working, tools=catalogue):
+            if event.text:
+                pieces.append(event.text)
+                yield event.text
 
-        self._repository.add_message(
-            conversation_id,
-            user_id,
-            {"role": "assistant", "content": "".join(pieces)},
-        )
+            if event.tool_calls:
+                calls = event.tool_calls
+
+        assistant = Message(role="assistant", content="".join(pieces), tool_calls=calls)
+        self._repository.add_message(conversation_id, user_id, assistant)
+        return assistant, calls
 
     def get_history(self, conversation_id: str, user_id: uuid.UUID) -> list[Message]:
         return self._repository.get_history(conversation_id, user_id)

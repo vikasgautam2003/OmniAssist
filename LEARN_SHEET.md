@@ -23,13 +23,24 @@
 | **D10** | **v0.1 runs on Groq free tier — `llama-3.3-70b-versatile`** | Budget is $0. Groq = ~1,000 req/day, 30 RPM, **no credit card, ongoing**; Anthropic has no free tier. v0.1 needs ~200 requests total. ⚠️ **Groq ≠ Grok** — Groq is an inference provider serving open-weight models (free); Grok is xAI's model ($25 credits then paid). Config is provider-neutral: `LLM_PROVIDER` / `LLM_API_KEY` / `LLM_MODEL`. | Yes — that's the point of D8 |
 | **D11** | **Conversation history must be trimmed** (Block 4), not left unbounded | Groq's free tier caps ~**14,400 tokens/minute**. Per C10, a 40-turn conversation is ~40K tokens in *one* request — over the entire per-minute budget. **A limit that makes you build it right beats unlimited quota that lets you build it wrong.** | No |
 | **D13** | **Model switched to `openai/gpt-oss-120b`** on Groq | Changed by editing **one line of `.env`** — zero code changes. Live proof that D3 + D8 work. | Yes — one line |
+| **D53** | **Tool arguments are never logged** | A model composes them from document text, which may be the user's private data. Logs outlive the request, are read by more people than the database, and ship to third-party aggregators. The tool *name*, outcome and duration are logged; the payload is not. There is a test asserting a calculation's operands do not appear in any log line. | No |
+| **D52** | **Cost is computed on every call even though the rate is zero** | Groq's free tier costs nothing, so `cost_usd` is always `0.0` today. Computing it anyway means the moment a paid provider is configured these lines become a cost report with no other change — and per-tenant cost tracking in v1.0 needs the history, which cannot be back-filled. | No |
+| **D51** | **structlog with JSON in production, console locally** | Logs are read by a machine first: grep is not a query language, and v1.0's dashboards need fields rather than prose. Locally a human reads them, so the renderer flips on one setting. Correlation is by context variable, not by passing an id through every signature. | Yes |
+| **D50** | **The worker pool is chosen by platform: `solo` on macOS, `prefork` on Linux** | macOS restricts `fork()` once certain frameworks are initialised, and Celery's prefork children then start with an empty task registry. Every job fails with an unpacking error from inside billiard that looks like anything but a platform problem. Linux, where this deploys, keeps prefork and its concurrency. | Yes |
+| **D49** | **The upload is stored first and only an id is queued** | Putting megabytes through the broker would make Redis a file store, which it is not: payloads are held in memory and its durability guarantee is not worth betting a user's upload on. Storing first also means a worker restart loses nothing — the bytes are already safe. | No |
+| **D48** | **Indexing moves to a Celery worker; upload returns 202 with a job id — closes D36** | Embedding hundreds of passages held an API worker for the whole request. Measured after the change: the request returns in **0.06s** while the work still takes **26.8s**. The user is freed, the work is unchanged, and the server can serve others. | No — this is the point |
+| **D47** | **Generated files are stored in PostgreSQL, not on disk** | A container filesystem is ephemeral, which matters for v0.4's deployment, and bytes in a column cannot be reached by a path-traversal bug. Object storage is the right answer once files are large; the `ArtifactStore` protocol makes that a one-file change. | Yes — S3 in v0.4 |
+| **D46** | **A tool returns a reference, never the file** | Returning base64 would put megabytes into the conversation, which is then re-sent to the model on every later turn — paying for tokens it cannot read, and filling the context window that retrieval needs. The tool returns one line naming the file and a download path. | No — this is the shape |
+| **D45** | **`ToolContext` is passed by the service, never composed by the model** | The first side-effecting tool needs to know which user it is acting for. Identity cannot be one of the JSON arguments the model writes, because the model is an untrusted caller and an injected instruction could then claim to be someone else. Added to the protocol when the need appeared rather than guessed at in Block 1. | No |
+| **D44** | **Streaming and tool detection happen in one pass — supersedes D40** | D40 said *run the loop non-streaming, then stream the answer*. Implementing it exposed a flaw: once the loop ends you already hold the final text, so you either regenerate it (double tokens, double latency) or fake-stream text in hand. Watching for tool-call deltas costs one accumulator keyed by index, and keeps genuine streaming including the preamble a model emits before calling a tool. | Yes |
+| **D43** | **Every block ends by updating all four documents in the same commit** | The documents are the deliverable, not a by-product: their purpose is answering *"you used AI, but do you know what you chose and why"*. Reconstructed later, the reasoning is already gone — the *why* fades first. `FILE_GUIDE.md` also carries each file's functions at a high level, because the likely interview question is "open this file and tell me what it does", not "recite line 40". | No — standing rule |
 | **D42** | **No tool with side effects in v0.3 Block 1** | D32's prompt injection was cosmetic while the model could only *speak*. A tool catalogue lets an injected instruction make it *act*, so the first tools compute and return — nothing writes, nothing takes a URL from the model. Web search in v0.4 is the first dangerous tool and gets its own review. | Yes, per tool |
 | **D41** | **`Message` becomes a dataclass with optional tool fields, rather than a second store for tool state** | `dict[str, str]` cannot express a call id, a tool name and arguments. Keeping tool turns beside the conversation would mean two sources of truth about what was said; a tool call *is* a turn. Costs a refactor of a type every layer touches. | No — this is the shape |
-| **D40** | **The tool loop runs non-streaming; only the final answer is streamed** | You cannot stream a reply the model has not committed to, and the first thing back may be tool calls rather than prose. Streaming while watching for tool-call deltas is provider-specific and much more code. The cost is a wait before the first token; a thinking indicator is the cheaper fix. | Yes |
+| **D40** | ~~The tool loop runs non-streaming; only the final answer is streamed~~ **superseded by D44** | You cannot stream a reply the model has not committed to, and the first thing back may be tool calls rather than prose. Streaming while watching for tool-call deltas is provider-specific and much more code. The cost is a wait before the first token; a thinking indicator is the cheaper fix. | Yes |
 | **D39** | **The tool loop is bounded by `max_tool_iterations` (default 5)** | A model can call tools indefinitely — search, search again, search again — burning the token budget and hanging the request with no error. On exhaustion the model is told it may not call more tools, so it still produces an answer rather than the request dying. | Yes |
 | **D38** | **Tools are declared vendor-neutrally with JSON Schema; the client adapter translates** | Groq wants `{type: "function", function: {...}}`, Anthropic wants `{name, description, input_schema}`. Letting either shape reach the service layer would make swapping provider stop being a config change. Same rule as D8 (LLM client) and D27 (embedder), applied a third time. | No — this is the design |
 | **D37** | **Verify UI work by driving a real browser, not by reading the code** | Streamlit's own headless test harness reported no exception and every control present, yet the rendered page had three defects it could not see: an icon font overridden into literal text, an uploader whose only entry point was hidden, and an avatar value that crashed every assistant reply. Chrome over the DevTools Protocol was already on the machine and needed no install. | n/a — practice |
-| **D36** | **Indexing runs inside the request, with a 10 MB upload cap** | Embedding a few hundred passages blocks a worker for seconds. The correct answer is a background queue, which is v0.3's Celery work. Accepted knowingly: the size cap bounds the worst case, and the limitation is scheduled rather than unnoticed. | Yes — v0.3 moves it to a queue |
+| **D36** | ~~Indexing runs inside the request, with a 10 MB upload cap~~ **superseded by D48** | Embedding a few hundred passages blocks a worker for seconds. The correct answer is a background queue, which is v0.3's Celery work. Accepted knowingly: the size cap bounds the worst case, and the limitation is scheduled rather than unnoticed. | Yes — v0.3 moves it to a queue |
 | **D35** | **Re-uploading a document replaces its passages rather than appending** | Appending stores every passage twice, so retrieval spends half its context budget repeating itself and the model sounds more confident for having seen the same text twice. Replace is also what a user means by "upload it again". | Yes |
 | **D34** | **Full roadmap retained — v0.3, v0.4 and v1.0 all built, no scope cut** | Measured pace is ~1.3 working days/week (8 active days across 42), which puts the full roadmap around April–June 2027 rather than December. Trimming the shallow generators (video, image, CSV export) and deferring React would have cost ~10 working days instead of ~24. Decision taken knowingly: the complete system is the goal, and the timeline moves instead of the scope. | Yes — revisit if December matters |
 | **D33** | **Update a branch by pulling locally (`git pull --rebase`), never with GitHub's "Update branch" button** | The button merges server-side and, when it cannot merge cleanly, picks a side instead of stopping. It discarded five files' worth of work and the pull request then squashed *that* commit, leaving `main` unable to import. A local pull puts the conflict in front of you. | Yes — but the cost of getting it wrong is a broken `main` |
@@ -926,6 +937,264 @@ This is the same lesson as SQL injection with one difference that makes it
 harder: a parameterised query separates code from data, and a model has only
 one channel for both.
 
+### C91 — A design doc is a hypothesis, and implementing it is the test
+D40 was written on paper and looked obviously right: run the tool loop without
+streaming, then stream the final answer. Writing the code exposed the flaw in a
+minute — when the loop ends you are already *holding* the final text, so
+"streaming the final answer" means either regenerating it at double cost or
+pretending to stream something you already have.
+
+The fix was to handle both in one pass. Providers send tool calls as fragments
+keyed by `index`: the id and name arrive first, then the arguments a few
+characters at a time. One accumulator reassembles them while text streams
+through untouched.
+
+**The design doc still earned its place** — it caught the `Message` refactor and
+the injection escalation before a line was written. The lesson is narrower: a
+design doc is a *hypothesis*, implementation is the experiment, and superseding
+an entry is the process working rather than failing.
+
+### C92 — `eval()` on model output is remote code execution
+The calculator could have been three lines: `return str(eval(expression))`. That
+would be a remote code execution hole, and a specific one — the model's input
+can come from an **uploaded PDF**, so an attacker who can get a document indexed
+can run arbitrary Python on the server.
+
+```python
+'__import__("os").system("rm -rf /")'   # valid Python, refused here
+'[].__class__.__base__.__subclasses__()'  # the classic eval escape
+```
+
+The defence is a whitelist, not a blacklist: parse to an AST and evaluate **only**
+`BinOp`, `UnaryOp` and numeric `Constant` nodes. Anything else — a name, a call,
+an attribute, a subscript — is refused before it runs. Blacklisting dangerous
+strings fails because the set of dangerous strings is unbounded.
+
+One more bound that is easy to miss: `2 ** 10_000_000` is plain arithmetic,
+needs no escape, and will hang the process while it exhausts memory. **Capping
+the exponent is cheaper than timing the call out.**
+
+### C93 — A tool failure is a message, not an exception
+`ToolRegistry.run()` never raises. Division by zero, a tool name the model
+invented, malformed JSON arguments — each becomes text sent back to the model:
+
+```
+calculate failed: division by zero
+```
+
+The model then corrects itself or explains to the user. Raising instead would
+turn *"the model asked for something impossible"* into a 500 for a user who did
+nothing wrong.
+
+The distinction to keep: **a tool failing is ordinary and recoverable; the
+provider being unreachable is not.** `LLMError` still propagates.
+
+### C94 — The protocol takes `**kwargs` because the caller is a model
+`Tool.run(self, **kwargs: Any) -> str` rather than an explicit signature, because
+arguments arrive as arbitrary JSON the model composed. A tool with
+`def run(self, n: int)` cannot satisfy the protocol — mypy says so, and that is
+correct.
+
+The consequence is that **each tool validates its own arguments.** JSON Schema
+constrains *shape*, never meaning: it can say "expression is a string", not
+"expression is arithmetic". A test that assumed a signature mismatch would be
+caught by the registry was wrong, and mypy caught the test.
+
+### C95 — A tool returns a reference, not a payload
+Tools return a string, so a generated PDF cannot be the return value. The
+tempting shortcut is base64 — and it is a trap that gets worse over time.
+
+Every tool result becomes a message in the conversation, and the whole
+conversation is sent to the model on **every later turn**. A 200 KB PDF encoded
+as base64 is roughly 70,000 tokens of noise the model cannot read, re-sent and
+re-paid for on each subsequent question, crowding out the retrieval context that
+is actually useful.
+
+So the file goes to an artifact store and the tool returns one line:
+
+```
+Created report.pdf (12 KB). Download it at /artifacts/f5b5d9af-...
+```
+
+**The general rule: when a tool produces something large, it returns where to
+find it, not the thing itself.**
+
+### C96 — Identity is passed by the system, never composed by the model
+The first side-effecting tool has to know which user it is acting for. The
+obvious route — add `user_id` to the tool's JSON Schema — is wrong, because
+**the model writes those arguments**, and the model's input can come from an
+uploaded document. An injected instruction could then claim to be someone else.
+
+`ToolContext` is therefore a separate parameter supplied by `ChatService`:
+
+```python
+def run(self, context: ToolContext, **kwargs: Any) -> str: ...
+```
+
+Arguments are untrusted and schema-validated; context is trusted and never
+reaches the model. Worth noting that this was **added when the need appeared**,
+not guessed at in Block 1 — a pure calculator gave no reason to invent it, and
+inventing it early would have been speculative.
+
+### C97 — Every output format has an injection of its own
+Three generator tools, three different escapes — and none of them is about SQL.
+
+**Spreadsheets.** openpyxl treats a leading `=` as a formula, and a spreadsheet
+formula is executable. A model composing a cell from document text can produce
+one by accident. Cells are prefixed so they are written as text.
+
+**Filenames.** The model composes the title, and it reaches a
+`Content-Disposition` header — where a newline is **header injection** and
+`../` would be path traversal if files were ever written to disk. Whitelisted
+to `[A-Za-z0-9 _-]`, same reasoning as the calculator's AST: the set of
+dangerous inputs is unbounded, the set of safe characters is not.
+
+**PDF text.** fpdf's core fonts are latin-1 only, so an em dash from a model —
+which they emit constantly — raises an exception mid-render.
+
+**The pattern: anything a model composes is untrusted input to whatever
+consumes it next**, and each consumer has its own idea of what is special.
+
+### C98 — Matplotlib on a server needs two things said out loud
+```python
+matplotlib.use("Agg")          # before pyplot is imported
+...
+finally:
+    plt.close(figure)
+```
+
+The default backend wants a window system. On a server there is none, so the
+first call hangs or crashes depending on the host — and it must be chosen
+*before* `pyplot` is imported, because the import binds it.
+
+And pyplot keeps a reference to every figure it creates, so they are never
+garbage collected. A server drawing charts all day leaks until it dies. There
+is a test asserting `plt.get_fignums() == []` after twelve charts, because this
+is invisible until production.
+
+### C99 — A queue does not make the work faster, it makes the wait someone else's problem
+Measured across the change, on the same document:
+
+| | Before | After |
+|---|---|---|
+| Request returns in | ~27s | **0.06s** |
+| Work takes | 27s | 27s |
+
+**Nothing got faster.** What changed is who waits. The API worker is free
+immediately and can serve other requests; the user gets a job id and a progress
+indicator instead of a frozen spinner with no way to know whether anything is
+happening.
+
+That is the honest framing of every queue, and it is worth saying plainly rather
+than implying a performance win that did not occur.
+
+### C100 — Three bugs a running worker found that no test could
+**1. `NotRegistered`.** The worker imports the module holding the Celery app,
+not the module holding the tasks — so nothing was registered and every job
+failed by name. Fixed with `include=["app.jobs.indexing"]`.
+
+**2. macOS fork safety.** The default prefork pool produced
+`ValueError: not enough values to unpack (expected 3, got 0)` from inside
+billiard. The real cause is that macOS restricts `fork()` after certain
+frameworks initialise, so the child starts with an empty task registry. Nothing
+in that error names the platform.
+
+**3. An import-time side effect I had just written a comment denying.**
+`celery_app = build_celery()` called `get_settings()` at import, so **the test
+suite stopped running without `.env`** — breaking the invariant the entire
+interface design exists to protect (D5). The comment directly above it claimed
+the opposite.
+
+The lesson is the same as the Streamlit UI defects: **some classes of bug are
+only reachable by running the real thing.** A worker process, like a browser, is
+a different execution environment, and unit tests do not enter it.
+
+### C101 — Keep the work out of the task decorator
+```python
+def index_uploaded_document(user_id, artifact_id) -> dict:   # plain function
+    ...
+
+@celery_app.task(name="index_uploaded_document")
+def index_uploaded_document_task(user_id: str, artifact_id: str) -> dict:
+    return index_uploaded_document(UUID(user_id), UUID(artifact_id))
+```
+
+The decorated function does two things: parse strings into UUIDs, and delegate.
+Everything else is an ordinary function, so the behaviour is tested **with no
+broker, no worker and no Redis running at all** — four tests that execute in
+milliseconds.
+
+The wrapper also marks the trust boundary. Task arguments travel through a
+broker and arrive as JSON, so the job re-checks ownership rather than assuming
+the enqueuing request already did.
+
+### C102 — A log line without correlation is almost useless
+Under any real load, requests interleave. A hundred concurrent users produce a
+hundred interleaved lines, and *"llm.call took 4 seconds"* belongs to nobody in
+particular.
+
+`new_request()` binds a `request_id` — and a `user_id` when there is one — into
+**context variables**, which follow the task rather than being passed through
+every function signature. One question produced three lines, from three
+different modules, all carrying the same id:
+
+```
+llm.call   prompt_tokens=178 completion_tokens=48  tools_requested=true
+tool.call  tool=calculate outcome=ok duration_ms=0.2
+llm.call   prompt_tokens=209 completion_tokens=26  tools_requested=false
+```
+
+Nothing passed that id between them. The alternative — threading a correlation
+id through `ChatService`, `ToolRegistry` and `GroqClient` — pollutes every
+signature with a parameter none of them have any use for.
+
+**A background job has no request to inherit from**, so it starts its own scope.
+Otherwise its lines float free of any context at all.
+
+### C103 — Compute the cost before there is a cost
+`cost_usd` is `0.0` on every line, because Groq's free tier is free. Computing
+it anyway costs two multiplications and buys two things.
+
+The moment a paid provider is configured, these lines **become a cost report
+with no other change**. And v1.0's per-tenant cost tracking needs *history* —
+which cannot be back-filled, because the token counts were never written down.
+
+The same reasoning applies to any metric that is currently trivial: the cheap
+moment to start recording it is before it matters.
+
+### C104 — Logs leak differently from databases
+A database row is read by the application. A **log line is read by more people,
+kept longer, and often shipped to a third party** — so what is safe in one is
+not automatically safe in the other.
+
+Tool arguments are the sharp case here. The model composes them *from document
+text*, so `{"expression": "<something from the user's contract>"}` could carry
+private data straight into a log aggregator. The tool name, outcome and duration
+are logged; the arguments are not, and a test asserts the operands of a
+calculation appear nowhere in the output.
+
+Also deliberately quiet: `/healthz`. A load balancer probing every ten seconds
+is 8,640 lines a day saying nothing, and a log nobody can skim is a log nobody
+reads — the same failure as the red CI in C81.
+
+### C105 — The adapter is where provider quirks go, again
+Token usage on a streamed response:
+
+| Provider | How |
+|---|---|
+| OpenAI | requires `stream_options={"include_usage": True}` |
+| **Groq** | attaches `usage` to the final chunk **by default** |
+
+I wrote the OpenAI form from habit and Groq's SDK rejected the argument
+outright. The fix belongs in `groq_client.py` and nowhere above it — the fifth
+time this boundary has earned its place, after error translation, tool-call
+shapes, message serialisation and streaming deltas.
+
+Groq also reports `queue_time` separately, which is genuinely useful: on a free
+tier it is often most of the latency, and it is **not something our own code can
+improve**. Logging it separately keeps that distinction visible instead of
+hiding it inside one duration figure.
+
 ---
 
 ## 📊 REFERENCE — LLM API pricing (2026-08-02)
@@ -1077,3 +1346,8 @@ Plus a module-name collision caught by mypy → C35 / D15.
 | 2026-10-11 | **UI redesign** — dark theme in `.streamlit/config.toml`, `ui/styles.py` holding the CSS, restructured auth and chat screens with a branded header, document cards, a grounded/ungrounded status pill, an empty state and suggestion chips. Verified by screenshotting a real browser over CDP, which found three defects a structural test reported as passing. Concepts C87–C88, decision D37 |
 | 2026-10-12 | **v0.2 SHIPPED, tagged `v0.2`.** Accounts, PostgreSQL persistence, JWT auth with ownership in the query, and the full RAG pipeline: PDF extraction, chunking, local embeddings, pgvector storage, retrieval into chat, upload UI. 37 modules, 54 tests, 4 migrations, CI green, one branch on the remote |
 | 2026-10-12 | **v0.3 design doc** — `DESIGN_v0.3.md` written before any code. Settles how tools are declared (JSON Schema, vendor-neutral), how the loop is bounded, why streaming and tools conflict, how tool failures feed back, that `Message` must become a dataclass, and that Block 1 ships no tool with side effects. Concepts C89–C90, decisions D38–D42 |
+| 2026-11-01 | **Documentation rule made absolute (D43).** `WHY.md` written covering v0.1-v0.3: per block, the problem, what was built, what was rejected and why, what the architecture gained, what it cost — plus a chapter on the four shipped defects and the questions an interviewer asks. `FILE_GUIDE.md` gains a **Contains** block for all 28 modules listing their functions and classes. README corrected: it still claimed v0.1 and omitted PostgreSQL and migrations |
+| 2026-11-01 | **v0.3 Block 1 — tool-use framework.** `Tool` protocol, `ToolRegistry` that never raises, `Calculator` with an AST whitelist, tool-aware streaming in the Groq adapter, and the bounded loop in `ChatService`. D40 superseded by D44 during implementation. 79 tests; verified against the live Groq API — the model called the tool and returned the correct product of two five-digit numbers. Concepts C91–C94, decision D44 |
+| 2026-11-01 | **v0.3 Blocks 2–4 — three generator tools.** An `ArtifactStore` (PostgreSQL, owned per user) plus `create_document` (fpdf2), `create_spreadsheet` (openpyxl) and `create_chart` (matplotlib). `ToolContext` added so a tool knows who it acts for. 97 tests. Verified live: one question produced a bar chart *and* a spreadsheet, the model choosing both tools in a single turn. Concepts C95–C98, decisions D45–D47 |
+| 2026-11-01 | **v0.3 Block 5 — background jobs.** Celery on Redis; upload stores the bytes, queues an id and returns **202** with a job id; the UI polls. Closes D36. Three bugs only a running worker exposed: `NotRegistered`, macOS fork safety, and an import-time `get_settings()` that broke the no-secrets-in-CI invariant. 104 tests. Measured: request 0.06s, work 26.8s. Concepts C99–C101, decisions D48–D50 |
+| 2026-11-01 | **v0.3 Block 6 — structured logging. BLOCK COMPLETE, v0.3 feature-complete.** structlog with JSON in production; request/user correlation by context variable; tokens, cost and provider queue time on every LLM call; outcome and duration on every tool call and job. Tool arguments deliberately never logged. 110 tests. Concepts C102–C105, decisions D51–D53 |

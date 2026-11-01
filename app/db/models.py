@@ -2,7 +2,17 @@ import uuid
 from datetime import datetime
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import DateTime, ForeignKey, Index, String, Text, Uuid, func
+from sqlalchemy import (
+    JSON,
+    DateTime,
+    ForeignKey,
+    Index,
+    LargeBinary,
+    String,
+    Text,
+    Uuid,
+    func,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from app.embeddings.base import EMBEDDING_DIMENSIONS
@@ -46,6 +56,12 @@ class MessageRow(Base):
         Text,
         nullable=False,
     )
+
+    # Nullable because most turns are not tool turns. A tool call is a turn in
+    # the conversation, so it belongs on this table rather than beside it.
+    tool_calls: Mapped[list[dict[str, str]] | None] = mapped_column(JSON, nullable=True)
+
+    tool_call_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -104,4 +120,31 @@ class DocumentChunk(Base):
 
     __table_args__ = (
         Index("ix_document_chunks_user_document", "user_id", "document_name"),
+    )
+
+
+class ArtifactRow(Base):
+    """A file produced by a tool.
+
+    Stored in PostgreSQL rather than on disk: a container filesystem is
+    ephemeral, which matters for v0.4's deployment, and bytes in a column
+    cannot be reached by a path-traversal bug. Object storage is the right
+    answer once files get large -- the repository interface makes that a
+    one-file change.
+    """
+
+    __tablename__ = "artifacts"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+
+    filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    media_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    content: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
     )
