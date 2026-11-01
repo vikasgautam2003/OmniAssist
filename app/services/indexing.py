@@ -1,5 +1,4 @@
-import uuid
-
+from app.domain import Scope
 from app.embeddings.base import Embedder
 from app.repositories.base import ChunkRepository
 from app.services.chunking import chunk_text
@@ -25,7 +24,7 @@ class Indexer:
         self._chunk_size = chunk_size
         self._chunk_overlap = chunk_overlap
 
-    def index(self, user_id: uuid.UUID, document_name: str, data: bytes) -> int:
+    def index(self, scope: Scope, document_name: str, data: bytes) -> int:
         """Index a document and return how many passages were stored.
 
         Extraction and embedding both happen before anything is written, so a
@@ -42,9 +41,9 @@ class Indexer:
         # Replace, never append. Re-uploading the same file would otherwise
         # store every passage twice, and retrieval would spend half its
         # context budget repeating itself.
-        self._chunks.delete_document(user_id, document_name)
+        self._chunks.delete_document(scope, document_name)
         self._chunks.add(
-            user_id=user_id,
+            scope=scope,
             document_name=document_name,
             chunks=passages,
             vectors=vectors,

@@ -96,6 +96,9 @@ from anywhere, including tests.
 **Contains**
 
 - `Message` — one turn in a conversation — role, content, and optional tool fields
+- `Scope` — the tenancy boundary a query runs inside: organisation and user, **no role**
+- `Principal` — who is acting, where, and with what authority
+- `Role`, `Organisation` — the three roles and the tenant
 - `ToolCall` — one request from the model to run a tool: id, name, raw JSON arguments
 - `User`, `Chunk` — frozen records for an account and a retrievable passage
 - `Vector` — alias for `list[float]`
@@ -266,6 +269,37 @@ errors are deliberately vendor-neutral: a caller must never catch
 error covers both *"does not exist"* and *"is not yours"* — telling a caller
 which would let them enumerate real IDs.
 
+### `app/repositories/organisations.py`, `memory_organisations.py`
+**Is** — the `OrganisationRepository` and its two implementations.
+
+**Contains**
+
+- `create_with_owner()` — organisation and owner membership in one transaction
+- `membership_for()` — resolves a user to their organisation and role
+- `members()`, `add_member()`, `remove_member()` — the roster
+- `is_unused_personal_workspace()`, `discard()` — lets someone hand back the
+  workspace signup gave them, so an invitation is possible at all
+
+**Why** — an organisation with no owner is unreachable and a membership
+pointing at nothing is worse, so both are written together. Every query filters
+on `organisation_id`, including deletes: without it an admin of one tenant
+could remove a member of another.
+
+### `app/routes/organisations.py`
+**Is** — `GET /organisation`, the member roster, add and remove.
+
+**Contains**
+
+- `current_organisation()` — which tenant you are in and your role
+- `list_members()` — any member may read the roster
+- `add_member()` — owners and admins only; refuses to grant ownership
+- `remove_member()` — refuses to remove yourself
+
+**Why** — **authorisation lives here, not in the repository.** Isolation is a
+data-breach risk so it belongs in the query; authorisation is about the action,
+and this is where the action is named. Granting ownership is deliberately a
+different endpoint: it is a different action with different consequences.
+
 ### `app/repositories/postgres.py`
 **Is** — the real implementations against PostgreSQL.
 
@@ -311,7 +345,7 @@ application interface and must stay in step with it.
 **Contains**
 
 - `Tool` — the protocol: `name`, `description`, `parameters`, `run(context, **kwargs)`
-- `ToolContext` — who the model acts for; passed by the service, never composed by the model
+- `ToolContext` — the `Scope` the model acts within; passed by the service, never composed by the model
 - `ToolSpec` — what the model is told about a tool, vendor-neutral
 - `ToolError` — a recoverable failure, written for a reader
 
@@ -746,6 +780,8 @@ a sidebar PDF uploader with the list of indexed documents, and logout.
 - `render_chat()`, `render_sidebar()`, `render_welcome()` — the chat screen, document sidebar and empty state
 - `stream_reply()` — parses SSE frames from the backend
 - `upload_document()`, `fetch_documents()` — the document calls
+- `fetch_artifact()`, `render_artifacts()` — fetch a generated file with the session token and show it inline
+- `strip_broken_links()` — removes the model's own markdown image syntax, which cannot render
 - `start_session()`, `end_session()` — token in and out of `st.session_state`
 
 **Why** — a usable front end in Python while the API stabilises; React arrives
@@ -896,5 +932,5 @@ This document.
 
 ---
 
-*Updated through v0.3 Block 6 — v0.3 feature-complete. Revise when
+*Updated through v0.4 Block 1 (multi-tenancy and RBAC). Revise when
 files are added, removed, or change purpose.*

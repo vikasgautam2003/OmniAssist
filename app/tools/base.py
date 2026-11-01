@@ -1,6 +1,7 @@
-import uuid
 from dataclasses import dataclass
 from typing import Any, Protocol
+
+from app.domain import Scope
 
 
 class ToolError(Exception):
@@ -21,7 +22,7 @@ class ToolContext:
     cannot be one of the arguments it composes.
     """
 
-    user_id: uuid.UUID
+    scope: Scope
 
 
 @dataclass(frozen=True)

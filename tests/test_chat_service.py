@@ -2,7 +2,7 @@ import uuid
 
 import pytest
 
-from app.domain import Message, ToolCall
+from app.domain import Message, Scope, ToolCall
 from app.repositories.base import ConversationNotFoundError
 from app.repositories.memory import InMemoryChunkRepository
 from app.services.chat import NO_MORE_TOOLS
@@ -13,23 +13,21 @@ from tests.conftest import ServiceFactory
 from tests.fakes import FakeEmbedder
 
 
-def test_reply_is_streamed_back(
-    make_service: ServiceFactory, user_id: uuid.UUID
-) -> None:
+def test_reply_is_streamed_back(make_service: ServiceFactory, scope: Scope) -> None:
     service, _fake = make_service("Hello there?")
 
-    reply = "".join(service.stream_reply("c1", user_id, "hi"))
+    reply = "".join(service.stream_reply("c1", scope, "hi"))
 
     assert reply == "Hello there?"
 
 
 def test_history_accumulates_across_turns(
-    make_service: ServiceFactory, user_id: uuid.UUID
+    make_service: ServiceFactory, scope: Scope
 ) -> None:
     service, fake = make_service("hello")
 
-    "".join(service.stream_reply("c1", user_id, "hi"))
-    "".join(service.stream_reply("c1", user_id, "how are you?"))
+    "".join(service.stream_reply("c1", scope, "hi"))
+    "".join(service.stream_reply("c1", scope, "how are you?"))
 
     messages = fake.calls[-1]
 
@@ -43,65 +41,63 @@ def test_history_accumulates_across_turns(
 
 
 def test_trimming_limits_what_is_sent(
-    make_service: ServiceFactory, user_id: uuid.UUID
+    make_service: ServiceFactory, scope: Scope
 ) -> None:
     service, fake = make_service("reply", max_history=4)
 
     for i in range(6):
-        "".join(service.stream_reply("c1", user_id, f"message {i}"))
+        "".join(service.stream_reply("c1", scope, f"message {i}"))
 
     assert len(fake.calls[-1]) <= 4
 
 
 def test_full_history_is_retained_while_trimming(
-    make_service: ServiceFactory, user_id: uuid.UUID
+    make_service: ServiceFactory, scope: Scope
 ) -> None:
     service, _fake = make_service("reply", max_history=4)
 
     for i in range(6):
-        "".join(service.stream_reply("c1", user_id, f"message {i}"))
+        "".join(service.stream_reply("c1", scope, f"message {i}"))
 
-    assert len(service.get_history("c1", user_id)) == 12
+    assert len(service.get_history("c1", scope)) == 12
 
 
-def test_get_history_returns_a_copy(
-    make_service: ServiceFactory, user_id: uuid.UUID
-) -> None:
+def test_get_history_returns_a_copy(make_service: ServiceFactory, scope: Scope) -> None:
     service, _fake = make_service("reply")
 
-    "".join(service.stream_reply("c1", user_id, "hello"))
+    "".join(service.stream_reply("c1", scope, "hello"))
 
-    history = service.get_history("c1", user_id)
+    history = service.get_history("c1", scope)
     history.append(Message(role="user", content="fake message"))
 
-    assert len(service.get_history("c1", user_id)) == 2
+    assert len(service.get_history("c1", scope)) == 2
 
 
 def test_another_users_conversation_is_invisible(
-    make_service: ServiceFactory, user_id: uuid.UUID, other_user_id: uuid.UUID
+    make_service: ServiceFactory, scope: Scope, other_scope: Scope
 ) -> None:
     """Reading someone else's conversation must look like it does not exist."""
     service, _fake = make_service("reply")
 
-    "".join(service.stream_reply("shared-id", user_id, "my secret is 1234"))
+    "".join(service.stream_reply("shared-id", scope, "my secret is 1234"))
 
-    assert service.get_history("shared-id", other_user_id) == []
+    assert service.get_history("shared-id", other_scope) == []
 
 
 def test_writing_to_another_users_conversation_is_rejected(
-    make_service: ServiceFactory, user_id: uuid.UUID, other_user_id: uuid.UUID
+    make_service: ServiceFactory, scope: Scope, other_scope: Scope
 ) -> None:
     """Guessing a conversation id must not grant write access to it."""
     service, _fake = make_service("reply")
 
-    "".join(service.stream_reply("shared-id", user_id, "my secret is 1234"))
+    "".join(service.stream_reply("shared-id", scope, "my secret is 1234"))
 
     with pytest.raises(ConversationNotFoundError):
-        "".join(service.stream_reply("shared-id", other_user_id, "what is it?"))
+        "".join(service.stream_reply("shared-id", other_scope, "what is it?"))
 
 
 def test_ownership_is_checked_before_the_stream_is_consumed(
-    make_service: ServiceFactory, user_id: uuid.UUID, other_user_id: uuid.UUID
+    make_service: ServiceFactory, scope: Scope, other_scope: Scope
 ) -> None:
     """The rejection must happen on call, not on first iteration.
 
@@ -111,17 +107,17 @@ def test_ownership_is_checked_before_the_stream_is_consumed(
     """
     service, _fake = make_service("reply")
 
-    "".join(service.stream_reply("shared-id", user_id, "my secret is 1234"))
+    "".join(service.stream_reply("shared-id", scope, "my secret is 1234"))
 
     with pytest.raises(ConversationNotFoundError):
-        service.stream_reply("shared-id", other_user_id, "what is it?")
+        service.stream_reply("shared-id", other_scope, "what is it?")
 
 
-def _retriever(user_id: uuid.UUID, texts: list[str], document: str = "policy.pdf"):
+def _retriever(scope: Scope, texts: list[str], document: str = "policy.pdf"):
     embedder = FakeEmbedder()
     chunks = InMemoryChunkRepository()
     chunks.add(
-        user_id=user_id,
+        scope=scope,
         document_name=document,
         chunks=texts,
         vectors=embedder.embed_documents(texts),
@@ -131,12 +127,12 @@ def _retriever(user_id: uuid.UUID, texts: list[str], document: str = "policy.pdf
 
 
 def test_retrieved_passages_reach_the_model(
-    make_service: ServiceFactory, user_id: uuid.UUID
+    make_service: ServiceFactory, scope: Scope
 ) -> None:
-    retriever = _retriever(user_id, ["the refund window is 30 days"])
+    retriever = _retriever(scope, ["the refund window is 30 days"])
     service, fake = make_service(retriever=retriever)
 
-    "".join(service.stream_reply("c1", user_id, "the refund window is 30 days"))
+    "".join(service.stream_reply("c1", scope, "the refund window is 30 days"))
 
     sent = fake.calls[0]
     assert sent[0].role == "system"
@@ -145,50 +141,53 @@ def test_retrieved_passages_reach_the_model(
 
 
 def test_history_stores_the_raw_question_not_the_augmented_prompt(
-    make_service: ServiceFactory, user_id: uuid.UUID
+    make_service: ServiceFactory, scope: Scope
 ) -> None:
     """Storing the passages would re-send stale context every later turn and
     bury what the user actually asked."""
-    retriever = _retriever(user_id, ["the refund window is 30 days"])
+    retriever = _retriever(scope, ["the refund window is 30 days"])
     service, _ = make_service(retriever=retriever)
 
-    "".join(service.stream_reply("c1", user_id, "how long for a refund?"))
+    "".join(service.stream_reply("c1", scope, "how long for a refund?"))
 
-    stored = service.get_history("c1", user_id)
+    stored = service.get_history("c1", scope)
     assert stored[0] == Message(role="user", content="how long for a refund?")
     assert all("Passages:" not in message.content for message in stored)
 
 
 def test_the_grounding_instruction_is_sent(
-    make_service: ServiceFactory, user_id: uuid.UUID
+    make_service: ServiceFactory, scope: Scope
 ) -> None:
-    retriever = _retriever(user_id, ["anything"])
+    retriever = _retriever(scope, ["anything"])
     service, fake = make_service(retriever=retriever)
 
-    "".join(service.stream_reply("c1", user_id, "anything"))
+    "".join(service.stream_reply("c1", scope, "anything"))
 
     assert "say so plainly rather than guessing" in fake.calls[0][0].content
 
 
 def test_no_retriever_means_no_context_block(
-    make_service: ServiceFactory, user_id: uuid.UUID
+    make_service: ServiceFactory, scope: Scope
 ) -> None:
     service, fake = make_service()
 
-    "".join(service.stream_reply("c1", user_id, "hello"))
+    "".join(service.stream_reply("c1", scope, "hello"))
 
     assert all(message.role != "system" for message in fake.calls[0])
 
 
 def test_nothing_retrieved_leaves_the_prompt_alone(
-    make_service: ServiceFactory, user_id: uuid.UUID
+    make_service: ServiceFactory, scope: Scope
 ) -> None:
     """An empty context block would make the assistant refuse ordinary
     questions it can answer perfectly well."""
-    retriever = _retriever(uuid.uuid4(), ["someone else's document"])
+    retriever = _retriever(
+        Scope(organisation_id=uuid.uuid4(), user_id=uuid.uuid4()),
+        ["someone else's document"],
+    )
     service, fake = make_service(retriever=retriever)
 
-    "".join(service.stream_reply("c1", user_id, "what is the capital of France?"))
+    "".join(service.stream_reply("c1", scope, "what is the capital of France?"))
 
     assert all(message.role != "system" for message in fake.calls[0])
 
@@ -204,13 +203,13 @@ def _call(
 
 
 def test_a_tool_the_model_asks_for_is_run_and_fed_back(
-    make_service: ServiceFactory, user_id: uuid.UUID
+    make_service: ServiceFactory, scope: Scope
 ) -> None:
     service, fake = make_service(
         reply="42", tools=_calc_registry(), tool_calls=[[_call()]]
     )
 
-    "".join(service.stream_reply("c1", user_id, "what is 6 times 7?"))
+    "".join(service.stream_reply("c1", scope, "what is 6 times 7?"))
 
     second_turn = fake.calls[1]
     assert second_turn[-1].role == "tool"
@@ -219,41 +218,41 @@ def test_a_tool_the_model_asks_for_is_run_and_fed_back(
 
 
 def test_the_catalogue_is_offered_to_the_model(
-    make_service: ServiceFactory, user_id: uuid.UUID
+    make_service: ServiceFactory, scope: Scope
 ) -> None:
     service, fake = make_service(tools=_calc_registry())
 
-    "".join(service.stream_reply("c1", user_id, "hello"))
+    "".join(service.stream_reply("c1", scope, "hello"))
 
     assert [spec.name for spec in fake.tools_offered[0]] == ["calculate"]
 
 
 def test_no_tools_means_no_catalogue(
-    make_service: ServiceFactory, user_id: uuid.UUID
+    make_service: ServiceFactory, scope: Scope
 ) -> None:
     service, fake = make_service()
 
-    "".join(service.stream_reply("c1", user_id, "hello"))
+    "".join(service.stream_reply("c1", scope, "hello"))
 
     assert fake.tools_offered[0] == []
 
 
 def test_the_tool_turn_is_stored_in_history(
-    make_service: ServiceFactory, user_id: uuid.UUID
+    make_service: ServiceFactory, scope: Scope
 ) -> None:
     """A tool call is a turn in the conversation, not a separate store."""
     service, _ = make_service(
         reply="42", tools=_calc_registry(), tool_calls=[[_call()]]
     )
 
-    "".join(service.stream_reply("c1", user_id, "what is 6 times 7?"))
+    "".join(service.stream_reply("c1", scope, "what is 6 times 7?"))
 
-    roles = [m.role for m in service.get_history("c1", user_id)]
+    roles = [m.role for m in service.get_history("c1", scope)]
     assert roles == ["user", "assistant", "tool", "assistant"]
 
 
 def test_a_failing_tool_does_not_fail_the_request(
-    make_service: ServiceFactory, user_id: uuid.UUID
+    make_service: ServiceFactory, scope: Scope
 ) -> None:
     """The error becomes text the model can read, not a 500 for the user."""
     service, fake = make_service(
@@ -262,13 +261,13 @@ def test_a_failing_tool_does_not_fail_the_request(
         tool_calls=[[_call(arguments='{"expression": "1/0"}')]],
     )
 
-    reply = "".join(service.stream_reply("c1", user_id, "what is 1/0?"))
+    reply = "".join(service.stream_reply("c1", scope, "what is 1/0?"))
 
     assert reply == "I cannot divide by zero."
     assert "zero" in fake.calls[1][-1].content
 
 
-def test_the_loop_is_bounded(make_service: ServiceFactory, user_id: uuid.UUID) -> None:
+def test_the_loop_is_bounded(make_service: ServiceFactory, scope: Scope) -> None:
     """A model that keeps calling tools would otherwise burn the token budget
     and hang the request with no error at all."""
     forever = [[_call()] for _ in range(50)]
@@ -279,14 +278,14 @@ def test_the_loop_is_bounded(make_service: ServiceFactory, user_id: uuid.UUID) -
         max_tool_iterations=3,
     )
 
-    "".join(service.stream_reply("c1", user_id, "loop please"))
+    "".join(service.stream_reply("c1", scope, "loop please"))
 
     assert len(fake.calls) == 4, "three tool turns, then one final answer"
     assert NO_MORE_TOOLS in fake.calls[-1][-1].content
 
 
 def test_text_before_a_tool_call_still_streams(
-    make_service: ServiceFactory, user_id: uuid.UUID
+    make_service: ServiceFactory, scope: Scope
 ) -> None:
     """Models often say 'let me check that' before calling a tool. Streaming
     and tool detection happen together so the preamble is not swallowed."""
@@ -294,6 +293,6 @@ def test_text_before_a_tool_call_still_streams(
         reply="The answer is 42.", tools=_calc_registry(), tool_calls=[[_call()]]
     )
 
-    reply = "".join(service.stream_reply("c1", user_id, "what is 6 times 7?"))
+    reply = "".join(service.stream_reply("c1", scope, "what is 6 times 7?"))
 
     assert reply == "The answer is 42."

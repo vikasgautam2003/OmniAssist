@@ -1067,6 +1067,152 @@ Groq also reports `queue_time` separately, which is worth keeping distinct: on a
 free tier it is often most of the latency, and it is **not something our own
 code can improve**. Folding it into one duration figure would hide that.
 
+### A bug found by using it, not testing it
+
+Testing v0.3 by hand produced a **broken image icon** where a chart should have
+been. The tool had worked perfectly — the PNG existed, correctly drawn, in the
+artifact store. The failure was one layer further out.
+
+The tool returns `Download it at /artifacts/<id>`, and the model turned that
+into markdown: `![Quarterly Revenue](/artifacts/<id>)`. That breaks twice:
+
+1. The path is **relative**, so the browser resolved it against Streamlit on
+   port 8501 rather than the API on 8000
+2. Even absolute, an `<img>` tag sends **no `Authorization` header** — and the
+   endpoint correctly refuses anonymous requests
+
+Neither is the model's fault. It produced a reasonable rendering of a reference
+that was never fetchable by a browser.
+
+The UI now strips that markup and **fetches the bytes itself** with the session
+token, showing images inline and offering a download button for everything else.
+A signed, time-limited URL would let the browser fetch directly — better once
+the front end is React, but it trades an auth header for a credential in a URL,
+which lands in browser history and server logs.
+
+**The lesson: giving a model a capability is not the same as giving the user
+access to its output.** Every automated check passed; the feature was broken.
+
+---
+
+## Part 3b — v0.4: multi-tenancy (in progress)
+
+### Block 1 — making the system multi-tenant
+
+**Why first.** It touches every table and every query. Anything built before it
+has to be revised after it — which is also why the React front end waits until
+Block 3, despite being the most visible and most tempting to start with.
+
+#### What a tenant is
+
+An **organisation** owns the data; a user belongs to one. The ownership rule
+from v0.2 does not change — it changes *column*. Queries still filter in the
+`WHERE` clause; they now filter on `organisation_id`, derived from the
+authenticated user and **never from a request parameter**, because a parameter
+can be forged.
+
+**Rejected:** a user belonging to many organisations. Correct eventually and
+genuinely useful, but it makes every request ambiguous — *which* organisation is
+this question about? That needs an org switcher and an active-org claim in the
+token. Deferred, not rejected.
+
+**Also rejected:** PostgreSQL row-level security. The database enforcing
+isolation itself is stronger, but it needs a session variable set per request
+and makes the repository layer's job invisible — the rule would no longer be
+*readable in the code*.
+
+#### Why a `Scope` object
+
+Four repositories and about twenty methods would each have gained an
+`organisation_id` parameter. One frozen dataclass instead:
+
+```python
+@dataclass(frozen=True)
+class Scope:
+    organisation_id: uuid.UUID
+    user_id: uuid.UUID
+```
+
+Signatures stay stable as more context arrives, and the boundary becomes
+impossible to omit by accident — which matters more here than elsewhere,
+because omitting it is a **data breach rather than a bug**.
+
+It deliberately carries **no role**, and that is the point of the next section.
+
+#### Isolation and authorisation are different questions
+
+They get conflated as "permissions" and belong in different layers:
+
+| | Question | Where | Why |
+|---|---|---|---|
+| **Isolation** | Can this tenant see this row? | the `WHERE` clause | forgetting it is a data breach, and a query without it does not exist |
+| **Authorisation** | May this role do this? | the route | it is about the *action*, and the route names the action |
+
+Authorisation in the repository would make the data layer know about roles and
+carry authority it has no use for. Isolation in the route would mean every
+future code path re-remembering it — which is precisely how the next feature
+leaks data.
+
+#### Shared documents, private conversations
+
+The design doc said only *"the organisation owns the data"*. Implementing it
+forced a distinction it had not made: a shared knowledge base is most of what an
+organisation is **for**, but sharing a tenant must not mean reading colleagues'
+chats.
+
+So `document_chunks` scope to the organisation; `conversations` and `artifacts`
+scope to the organisation **and** the user. There are tests for both directions.
+
+#### The migration moved data, not just schema
+
+Existing rows had a `user_id` and no organisation. The sequence: create the
+tables, give every existing user a personal organisation they own, add
+`organisation_id` **nullable**, backfill it from `user_id`, then set it
+`NOT NULL`.
+
+In production that is **three deploys** — during a rolling deploy, old code is
+still inserting rows that know nothing about the column. One migration was safe
+here only because no old code is running, and the migration says so.
+
+Verified rather than assumed: 14 organisations created, 112 rows backfilled,
+**none left untenanted**.
+
+#### Two correct rules that contradicted each other
+
+The design said a user belongs to one organisation, and that signup creates a
+personal workspace. Both reasonable. Together they make invitations
+**impossible** — every account already belongs somewhere, so every invite is
+refused:
+
+```
+409 That account already belongs to an organisation.
+```
+
+Nothing caught this: not the design doc, not the types, not 123 passing tests.
+Each rule is individually consistent, and the contradiction only appears when
+the feature is *used*.
+
+The resolution picks which rule bends. An **unused** workspace can be handed
+back; someone who has started using theirs keeps it, because moving them would
+strand their data behind a boundary nobody can cross.
+
+**Check that your invariants can all hold at once against a concrete scenario,
+not by reading them.**
+
+#### And a commit that never reached `main`
+
+While verifying this block I found that the previous block's artifact-rendering
+fix was **not in `main` at all** — neither the code nor its documentation. The
+pull request had merged the commit *before* it.
+
+The cause was mine: `git push -q` suppresses the output that confirms what
+moved, and I did not check. The commit survived locally and a cherry-pick
+recovered it.
+
+This is the **second** time this project has lost work between a local commit
+and a merge. The first was an automatic branch update discarding it. Both share
+one root: **assuming the remote matches local instead of verifying it.**
+
 ---
 
 ## Part 4 — Every file, and what it is for

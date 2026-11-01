@@ -37,7 +37,7 @@ def store(
     to the model on every later turn, filling the context window with data it
     cannot read and paying for the tokens each time.
     """
-    artifact_id = artifacts.save(context.user_id, filename, media_type, content)
+    artifact_id = artifacts.save(context.scope, filename, media_type, content)
     return (
         f"Created {filename} ({len(content) // 1024 or 1} KB). "
         f"Download it at /artifacts/{artifact_id}"

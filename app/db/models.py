@@ -10,6 +10,7 @@ from sqlalchemy import (
     LargeBinary,
     String,
     Text,
+    UniqueConstraint,
     Uuid,
     func,
 )
@@ -26,6 +27,13 @@ class Conversation(Base):
     __tablename__ = "conversations"
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    organisation_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("organisations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
     user_id: Mapped[uuid.UUID] = mapped_column(
         Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
     )
@@ -98,6 +106,15 @@ class DocumentChunk(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
 
+    organisation_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("organisations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    # Kept alongside organisation_id: who uploaded it is worth knowing even
+    # though retrieval is scoped to the organisation.
     user_id: Mapped[uuid.UUID] = mapped_column(
         Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
     )
@@ -137,6 +154,13 @@ class ArtifactRow(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
 
+    organisation_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("organisations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
     user_id: Mapped[uuid.UUID] = mapped_column(
         Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
     )
@@ -147,4 +171,49 @@ class ArtifactRow(Base):
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class OrganisationRow(Base):
+    """A tenant. Every owned row belongs to exactly one."""
+
+    __tablename__ = "organisations"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class MembershipRow(Base):
+    """Which user belongs to which organisation, and with what role.
+
+    A separate table rather than a column on users, because many-to-many is
+    where this goes next -- a user belonging to several organisations needs an
+    active-org claim in the token and a switcher in the UI, which is deferred,
+    not rejected. The unique constraint enforces one-org-per-user for now.
+    """
+
+    __tablename__ = "memberships"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    organisation_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("organisations.id", ondelete="CASCADE"), nullable=False
+    )
+
+    role: Mapped[str] = mapped_column(String(20), nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint("user_id", name="uq_memberships_user"),
+        Index("ix_memberships_organisation", "organisation_id"),
     )

@@ -1,4 +1,5 @@
 import json
+import re
 import time
 import uuid
 from collections.abc import Iterator
@@ -9,6 +10,8 @@ import styles
 
 API_URL = "http://localhost:8000"
 MIN_PASSWORD_LENGTH = 12
+
+ARTIFACT_PATTERN = re.compile(r"/artifacts/([0-9a-f-]{36})")
 
 POLL_ATTEMPTS = 60
 POLL_SECONDS = 2.0
@@ -201,6 +204,69 @@ def fetch_documents() -> list[str]:
     return list(response.json()) if response.status_code == 200 else []
 
 
+def fetch_artifact(artifact_id: str) -> tuple[bytes, str, str] | None:
+    """Fetch a generated file as the signed-in user.
+
+    The browser cannot do this itself: an <img> tag sends no Authorization
+    header, and a relative path in the model's reply resolves to Streamlit
+    rather than the API. So the UI fetches the bytes and renders them.
+    """
+    try:
+        response = httpx.get(
+            f"{API_URL}/artifacts/{artifact_id}",
+            headers={"Authorization": f"Bearer {st.session_state.token}"},
+            timeout=30.0,
+        )
+    except httpx.HTTPError:
+        return None
+
+    if response.status_code != 200:
+        return None
+
+    disposition = response.headers.get("content-disposition", "")
+    match = re.search(r'filename="([^"]+)"', disposition)
+    name = match.group(1) if match else f"{artifact_id}.bin"
+
+    return response.content, response.headers.get("content-type", ""), name
+
+
+def render_artifacts(text: str) -> None:
+    """Show every file the reply refers to, inline."""
+    seen: list[str] = []
+
+    for artifact_id in ARTIFACT_PATTERN.findall(text):
+        if artifact_id in seen:
+            continue
+        seen.append(artifact_id)
+
+        found = fetch_artifact(artifact_id)
+
+        if found is None:
+            continue
+
+        content, media_type, name = found
+
+        if media_type.startswith("image/"):
+            st.image(content, caption=name)
+
+        st.download_button(
+            f"Download {name}",
+            data=content,
+            file_name=name,
+            mime=media_type or "application/octet-stream",
+            key=f"dl-{artifact_id}",
+        )
+
+
+def strip_broken_links(text: str) -> str:
+    """Remove the model's own markdown image syntax for artifacts.
+
+    Rendering it would show a broken image: the path is relative and needs an
+    auth header. The file itself is rendered separately, just below.
+    """
+    return re.sub(r"!\[[^\]]*\]\(/artifacts/[0-9a-f-]{36}\)", "", text)
+
+
 def render_sidebar() -> list[str]:
     """Draw the sidebar and return the documents currently indexed."""
     with st.sidebar:
@@ -292,7 +358,10 @@ def render_chat() -> None:
     # emoji, so it was read as a filename and raised on every assistant reply.
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+            st.markdown(strip_broken_links(message["content"]))
+
+            if message["role"] == "assistant":
+                render_artifacts(message["content"])
 
     # A suggestion chip queues its text and re-runs; the queued value is taken
     # here so both entry points go through exactly the same code path.

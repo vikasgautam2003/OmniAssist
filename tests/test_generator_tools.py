@@ -4,7 +4,7 @@ import pytest
 from openpyxl import load_workbook
 
 from app.artifacts.memory import InMemoryArtifactStore
-from app.domain import Artifact
+from app.domain import Artifact, Scope
 from app.tools.base import ToolContext, ToolError
 from app.tools.charts import CreateChart
 from app.tools.documents import CreateDocument
@@ -18,7 +18,7 @@ def store() -> InMemoryArtifactStore:
 
 @pytest.fixture
 def context() -> ToolContext:
-    return ToolContext(user_id=uuid.uuid4())
+    return ToolContext(scope=Scope(organisation_id=uuid.uuid4(), user_id=uuid.uuid4()))
 
 
 def only_artifact(store: InMemoryArtifactStore) -> Artifact:
@@ -183,8 +183,9 @@ def test_another_user_cannot_fetch_an_artifact(
     CreateDocument(store).run(context, title="Private", body="secret")
     artifact_id = next(iter(store._rows))
 
-    assert store.get(uuid.uuid4(), artifact_id) is None
-    assert store.get(context.user_id, artifact_id) is not None
+    other = Scope(organisation_id=uuid.uuid4(), user_id=uuid.uuid4())
+    assert store.get(other, artifact_id) is None
+    assert store.get(context.scope, artifact_id) is not None
 
 
 def test_a_title_that_already_has_the_extension_is_not_doubled(

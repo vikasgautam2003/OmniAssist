@@ -6,7 +6,7 @@ from sqlalchemy.exc import IntegrityError
 
 from app.db.models import Conversation, DocumentChunk, MessageRow, UserRow
 from app.db.session import get_session_factory
-from app.domain import Chunk, Message, ToolCall, User, Vector
+from app.domain import Chunk, Message, Scope, ToolCall, User, Vector
 
 
 def _from_row(row: MessageRow) -> Message:
@@ -31,7 +31,7 @@ class PostgresConversationRepository:
     def get_history(
         self,
         conversation_id: str,
-        user_id: uuid.UUID,
+        scope: Scope,
         limit: int | None = None,
     ) -> list[Message]:
         # Ownership is part of the query, not a check beside it: there is no
@@ -43,7 +43,8 @@ class PostgresConversationRepository:
             .join(Conversation, Conversation.id == MessageRow.conversation_id)
             .where(
                 MessageRow.conversation_id == conversation_id,
-                Conversation.user_id == user_id,
+                Conversation.organisation_id == scope.organisation_id,
+                Conversation.user_id == scope.user_id,
             )
         )
 
@@ -71,27 +72,31 @@ class PostgresConversationRepository:
 
             return [_from_row(row) for row in rows]
 
-    def add_message(
-        self, conversation_id: str, user_id: uuid.UUID, message: Message
-    ) -> None:
+    def add_message(self, conversation_id: str, scope: Scope, message: Message) -> None:
         with self._session_factory() as session:
             # Atomic upsert rather than SELECT-then-INSERT: two concurrent
             # requests opening the same conversation would both see it missing
             # and the second INSERT would raise a duplicate-key error.
             session.execute(
                 pg_insert(Conversation)
-                .values(id=conversation_id, user_id=user_id)
+                .values(
+                    id=conversation_id,
+                    user_id=scope.user_id,
+                    organisation_id=scope.organisation_id,
+                )
                 .on_conflict_do_nothing(index_elements=["id"])
             )
 
             # The upsert does nothing when the id already exists -- including
             # when it belongs to somebody else. Without this check a user could
             # write into another user's conversation by guessing its id.
-            owner = session.scalar(
-                select(Conversation.user_id).where(Conversation.id == conversation_id)
-            )
+            owner = session.execute(
+                select(Conversation.organisation_id, Conversation.user_id).where(
+                    Conversation.id == conversation_id
+                )
+            ).first()
 
-            if owner != user_id:
+            if owner != (scope.organisation_id, scope.user_id):
                 raise ConversationNotFoundError(conversation_id)
 
             session.add(
@@ -164,7 +169,7 @@ class PostgresChunkRepository:
 
     def add(
         self,
-        user_id: uuid.UUID,
+        scope: Scope,
         document_name: str,
         chunks: list[str],
         vectors: list[Vector],
@@ -178,7 +183,8 @@ class PostgresChunkRepository:
 
         rows = [
             DocumentChunk(
-                user_id=user_id,
+                organisation_id=scope.organisation_id,
+                user_id=scope.user_id,
                 document_name=document_name,
                 chunk_index=index,
                 content=content,
@@ -192,14 +198,14 @@ class PostgresChunkRepository:
             session.add_all(rows)
             session.commit()
 
-    def search(self, user_id: uuid.UUID, vector: Vector, limit: int) -> list[Chunk]:
+    def search(self, scope: Scope, vector: Vector, limit: int) -> list[Chunk]:
         # user_id is a filter inside the query, never a check beside it:
         # retrieval that is not scoped answers one user from another's
         # documents. Cosine distance matches what the embedding model was
         # trained for; a different operator would quietly rank worse.
         query = (
             select(DocumentChunk)
-            .where(DocumentChunk.user_id == user_id)
+            .where(DocumentChunk.organisation_id == scope.organisation_id)
             .order_by(DocumentChunk.embedding.cosine_distance(vector))
             .limit(limit)
         )
@@ -216,11 +222,11 @@ class PostgresChunkRepository:
             for row in rows
         ]
 
-    def delete_document(self, user_id: uuid.UUID, document_name: str) -> None:
+    def delete_document(self, scope: Scope, document_name: str) -> None:
         # user_id is in the WHERE clause here too: a delete that only matched
         # on name would let one user erase another's document.
         statement = delete(DocumentChunk).where(
-            DocumentChunk.user_id == user_id,
+            DocumentChunk.organisation_id == scope.organisation_id,
             DocumentChunk.document_name == document_name,
         )
 
@@ -228,10 +234,10 @@ class PostgresChunkRepository:
             session.execute(statement)
             session.commit()
 
-    def list_documents(self, user_id: uuid.UUID) -> list[str]:
+    def list_documents(self, scope: Scope) -> list[str]:
         query = (
             select(DocumentChunk.document_name)
-            .where(DocumentChunk.user_id == user_id)
+            .where(DocumentChunk.organisation_id == scope.organisation_id)
             .distinct()
             .order_by(DocumentChunk.document_name)
         )

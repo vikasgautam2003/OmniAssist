@@ -1,12 +1,12 @@
 import uuid
 from typing import Protocol
 
-from app.domain import Artifact
+from app.domain import Artifact, Scope
 
 
 class ArtifactStore(Protocol):
     def save(
-        self, user_id: uuid.UUID, filename: str, media_type: str, content: bytes
+        self, scope: Scope, filename: str, media_type: str, content: bytes
     ) -> uuid.UUID: ...
 
-    def get(self, user_id: uuid.UUID, artifact_id: uuid.UUID) -> Artifact | None: ...
+    def get(self, scope: Scope, artifact_id: uuid.UUID) -> Artifact | None: ...
