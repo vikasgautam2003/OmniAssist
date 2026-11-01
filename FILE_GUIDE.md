@@ -537,6 +537,35 @@ dropped 32 of 45 characters with no error at all.
 
 ## HTTP layer
 
+### `app/observability/logging.py`
+**Is** — structlog configuration and the correlation helpers.
+
+**Contains**
+
+- `configure(json_output)` — JSON for machines in production, console for humans locally
+- `new_request(user_id)` — starts a correlation scope and returns its id
+- `bind(**values)` — adds fields every later line in the scope will carry
+- `get_logger(name)` — the logger factory
+
+**Why** — a log line without correlation is almost useless: under load, requests
+interleave and *"this took 4 seconds"* belongs to nobody. The id lives in a
+**context variable** so it follows the task rather than polluting every function
+signature with a parameter none of them use.
+
+Named `observability` rather than `logging` so that `import logging` inside the
+package still reaches the standard library.
+
+### `app/observability/middleware.py`
+**Is** — the per-request log line.
+
+**Contains**
+
+- `RequestLogging` — starts the scope, times the request, sets `X-Request-ID`
+- `QUIET_PATHS` — `/healthz`, because 8,640 lines a day saying nothing is noise
+
+**Why** — it also logs and re-raises unhandled exceptions: without that the only
+record is a stack trace with no request id, path or duration attached.
+
 ### `app/jobs/celery_app.py`
 **Is** — the Celery application: broker, serialisation and worker settings.
 
@@ -867,5 +896,5 @@ This document.
 
 ---
 
-*Updated through v0.3 Block 5 (background jobs). Revise when
+*Updated through v0.3 Block 6 — v0.3 feature-complete. Revise when
 files are added, removed, or change purpose.*

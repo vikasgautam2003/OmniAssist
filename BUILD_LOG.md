@@ -13,7 +13,7 @@
 |---|---|---|
 | **v0.1** | Streaming chatbot with history | ✅ **shipped** |
 | **v0.2** | Postgres, auth, PDF upload + RAG, pytest | ✅ **shipped** `v0.2` |
-| v0.3 | Tool-use framework, Redis cache, Celery jobs, structured logging | 🔄 design done |
+| **v0.3** | Tool-use framework, Celery jobs, structured logging | ✅ **feature-complete** |
 | v0.4 | Multi-tenancy, RBAC, Docker, AWS deploy, CD | ⬜ |
 | v1.0 | Monitoring, alerting, LLM evals, load testing, cost tracking | ⬜ |
 
@@ -491,7 +491,7 @@ be revised after every block.
 | 3 | Spreadsheet generation (Excel) as a tool | ✅ |
 | 4 | Charts as a tool | ✅ |
 | 5 | Background jobs — Celery + Redis; moves indexing out of the request (D36) | ✅ |
-| 6 | Structured logging — latency, tokens and cost per request | ⬜ |
+| 6 | Structured logging — latency, tokens and cost per request | ✅ |
 
 **Decisions already taken (D38–D42):** tools declared vendor-neutrally in JSON
 Schema with the adapter translating · the loop bounded by `max_tool_iterations`
@@ -637,6 +637,53 @@ Nothing got faster — the *wait* moved. Worth stating plainly.
 brew services start redis
 uv run celery -A app.jobs.celery_app:celery_app worker --loglevel=info
 uv run pytest        # 104 tests, and still green with no .env
+```
+
+---
+
+### Block 6 — structured logging ✅ — v0.3 complete
+
+**Why last:** it instruments everything before it. Written earlier it would
+have been revised after every block, and the fields worth logging were not
+knowable until the tools and the queue existed.
+
+**Files**
+
+| File | Purpose |
+|---|---|
+| `app/observability/logging.py` | structlog config, `new_request()`, `bind()` |
+| `app/observability/middleware.py` | per-request log line + `X-Request-ID` |
+| `app/clients/groq_client.py` | tokens, cost, duration, provider queue time |
+| `app/tools/registry.py` | tool name, outcome, duration — **never arguments** |
+| `app/jobs/indexing.py` | its own correlation scope; outcome and duration |
+
+**What one question now produces**
+
+```
+llm.call   prompt_tokens=178 completion_tokens=48 duration_ms=595.8
+           provider_queue_ms=49.7 tools_requested=true
+tool.call  tool=calculate outcome=ok duration_ms=0.2
+llm.call   prompt_tokens=209 completion_tokens=26 duration_ms=362.8
+           provider_queue_ms=210.8 tools_requested=false
+```
+
+All three share one `request_id` and `user_id`, bound once by context variable
+rather than threaded through every signature.
+
+**Key points**
+- **Cost is computed although the rate is zero.** The field exists so token
+  counts become money the moment a paid provider is configured, and v1.0 needs
+  the history, which cannot be back-filled
+- **Tool arguments are never logged** — a model composes them from document
+  text, which may be private. There is a test asserting it
+- `/healthz` is quiet: 8,640 lines a day saying nothing is a log nobody skims
+- Groq attaches `usage` to the final chunk **by default**; OpenAI needs
+  `stream_options`. That difference lives in the adapter, like every other one
+- A **job starts its own correlation scope** — it has no request to inherit
+
+**Verify**
+```bash
+uv run pytest           # 110 tests, green with no key, no database, no Redis
 ```
 
 ---

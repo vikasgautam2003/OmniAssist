@@ -687,7 +687,7 @@ to do; an error that is our fault should say nothing about our internals.**
 
 ---
 
-## Part 3 — v0.3: tool use (in progress)
+## Part 3 — v0.3: tool use
 
 **Goal:** stop adding capabilities as application code and start adding them as
 **tools** the model chooses between.
@@ -992,6 +992,80 @@ protect.
 All three are the same lesson as the Streamlit defects in Part 5: **a worker
 process, like a browser, is a different execution environment, and unit tests do
 not enter it.**
+
+### Block 6 — making the system legible
+
+**Why last.** Logging instruments everything before it. Written earlier it would
+have been revised after every block, and the fields worth recording were not
+knowable until the tools and the queue existed.
+
+**What one question produces now:**
+
+```
+llm.call   prompt_tokens=178 completion_tokens=48 duration_ms=595.8
+           provider_queue_ms=49.7  tools_requested=true
+tool.call  tool=calculate outcome=ok duration_ms=0.2
+llm.call   prompt_tokens=209 completion_tokens=26 duration_ms=362.8
+           provider_queue_ms=210.8 tools_requested=false
+```
+
+387 prompt tokens and 74 completion tokens, across two model calls, for one
+question. Before this block that number was unknowable.
+
+#### Why correlation is a context variable, not a parameter
+
+All three lines above carry the same `request_id` and `user_id`, and **nothing
+passed them between the modules**. The alternative is threading a correlation id
+through `ChatService`, `ToolRegistry` and `GroqClient` — polluting every
+signature with a parameter none of them has any use for, and which someone will
+eventually forget to forward.
+
+Context variables follow the task instead. A background job has no HTTP request
+to inherit from, so it starts its own scope; without that its lines would float
+free of any context at all.
+
+#### Why cost is computed when the cost is zero
+
+`cost_usd` is `0.0` on every line, because Groq's free tier is free. Computing
+it costs two multiplications and buys two things.
+
+The moment a paid provider is configured, these lines **become a cost report
+with no other change**. And v1.0's per-tenant cost tracking needs *history* —
+which cannot be back-filled, because the token counts were never recorded.
+
+**The general point: the cheap moment to start recording a metric is before it
+matters.**
+
+#### Logs leak differently from databases
+
+A database row is read by the application. A log line is read by more people,
+kept longer, and often shipped to a third-party aggregator — so what is safe in
+one is not automatically safe in the other.
+
+Tool arguments are the sharp case. The model composes them **from document
+text**, so `{"expression": "<something from the user's contract>"}` would carry
+private data straight into a log pipeline. The tool name, outcome and duration
+are logged; the arguments are not, and a test asserts the operands of a
+calculation appear nowhere in the output.
+
+`/healthz` is also silenced. A load balancer probing every ten seconds is 8,640
+lines a day saying nothing — and a log nobody can skim is a log nobody reads,
+which is the same failure as the red CI in Part 5.
+
+#### The adapter earns its place a fifth time
+
+Token usage on a streamed response differs by vendor: OpenAI requires
+`stream_options={"include_usage": True}`, while **Groq attaches `usage` to the
+final chunk by default**. I wrote the OpenAI form from habit and Groq's SDK
+rejected the argument outright.
+
+That difference lives in `groq_client.py` and nowhere above it — after error
+translation, tool-call shapes, message serialisation and streaming deltas, this
+is the fifth distinct provider quirk the boundary has absorbed.
+
+Groq also reports `queue_time` separately, which is worth keeping distinct: on a
+free tier it is often most of the latency, and it is **not something our own
+code can improve**. Folding it into one duration figure would hide that.
 
 ---
 

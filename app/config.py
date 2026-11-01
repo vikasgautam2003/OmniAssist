@@ -34,6 +34,14 @@ class Settings(BaseSettings):
 
     redis_url: str = DEFAULT_REDIS_URL
 
+    # JSON locally too would be unreadable; machines read it in production.
+    log_json: bool = False
+    # Groq's free tier costs nothing, so these default to zero -- but the
+    # field exists so token counts can become money the moment a paid
+    # provider is configured, which is what v1.0's per-tenant tracking needs.
+    cost_per_million_input_tokens: float = 0.0
+    cost_per_million_output_tokens: float = 0.0
+
     app_env: Literal["local", "staging", "production"] = "local"
 
 

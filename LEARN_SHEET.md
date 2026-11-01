@@ -23,6 +23,9 @@
 | **D10** | **v0.1 runs on Groq free tier — `llama-3.3-70b-versatile`** | Budget is $0. Groq = ~1,000 req/day, 30 RPM, **no credit card, ongoing**; Anthropic has no free tier. v0.1 needs ~200 requests total. ⚠️ **Groq ≠ Grok** — Groq is an inference provider serving open-weight models (free); Grok is xAI's model ($25 credits then paid). Config is provider-neutral: `LLM_PROVIDER` / `LLM_API_KEY` / `LLM_MODEL`. | Yes — that's the point of D8 |
 | **D11** | **Conversation history must be trimmed** (Block 4), not left unbounded | Groq's free tier caps ~**14,400 tokens/minute**. Per C10, a 40-turn conversation is ~40K tokens in *one* request — over the entire per-minute budget. **A limit that makes you build it right beats unlimited quota that lets you build it wrong.** | No |
 | **D13** | **Model switched to `openai/gpt-oss-120b`** on Groq | Changed by editing **one line of `.env`** — zero code changes. Live proof that D3 + D8 work. | Yes — one line |
+| **D53** | **Tool arguments are never logged** | A model composes them from document text, which may be the user's private data. Logs outlive the request, are read by more people than the database, and ship to third-party aggregators. The tool *name*, outcome and duration are logged; the payload is not. There is a test asserting a calculation's operands do not appear in any log line. | No |
+| **D52** | **Cost is computed on every call even though the rate is zero** | Groq's free tier costs nothing, so `cost_usd` is always `0.0` today. Computing it anyway means the moment a paid provider is configured these lines become a cost report with no other change — and per-tenant cost tracking in v1.0 needs the history, which cannot be back-filled. | No |
+| **D51** | **structlog with JSON in production, console locally** | Logs are read by a machine first: grep is not a query language, and v1.0's dashboards need fields rather than prose. Locally a human reads them, so the renderer flips on one setting. Correlation is by context variable, not by passing an id through every signature. | Yes |
 | **D50** | **The worker pool is chosen by platform: `solo` on macOS, `prefork` on Linux** | macOS restricts `fork()` once certain frameworks are initialised, and Celery's prefork children then start with an empty task registry. Every job fails with an unpacking error from inside billiard that looks like anything but a platform problem. Linux, where this deploys, keeps prefork and its concurrency. | Yes |
 | **D49** | **The upload is stored first and only an id is queued** | Putting megabytes through the broker would make Redis a file store, which it is not: payloads are held in memory and its durability guarantee is not worth betting a user's upload on. Storing first also means a worker restart loses nothing — the bytes are already safe. | No |
 | **D48** | **Indexing moves to a Celery worker; upload returns 202 with a job id — closes D36** | Embedding hundreds of passages held an API worker for the whole request. Measured after the change: the request returns in **0.06s** while the work still takes **26.8s**. The user is freed, the work is unchanged, and the server can serve others. | No — this is the point |
@@ -1125,6 +1128,73 @@ The wrapper also marks the trust boundary. Task arguments travel through a
 broker and arrive as JSON, so the job re-checks ownership rather than assuming
 the enqueuing request already did.
 
+### C102 — A log line without correlation is almost useless
+Under any real load, requests interleave. A hundred concurrent users produce a
+hundred interleaved lines, and *"llm.call took 4 seconds"* belongs to nobody in
+particular.
+
+`new_request()` binds a `request_id` — and a `user_id` when there is one — into
+**context variables**, which follow the task rather than being passed through
+every function signature. One question produced three lines, from three
+different modules, all carrying the same id:
+
+```
+llm.call   prompt_tokens=178 completion_tokens=48  tools_requested=true
+tool.call  tool=calculate outcome=ok duration_ms=0.2
+llm.call   prompt_tokens=209 completion_tokens=26  tools_requested=false
+```
+
+Nothing passed that id between them. The alternative — threading a correlation
+id through `ChatService`, `ToolRegistry` and `GroqClient` — pollutes every
+signature with a parameter none of them have any use for.
+
+**A background job has no request to inherit from**, so it starts its own scope.
+Otherwise its lines float free of any context at all.
+
+### C103 — Compute the cost before there is a cost
+`cost_usd` is `0.0` on every line, because Groq's free tier is free. Computing
+it anyway costs two multiplications and buys two things.
+
+The moment a paid provider is configured, these lines **become a cost report
+with no other change**. And v1.0's per-tenant cost tracking needs *history* —
+which cannot be back-filled, because the token counts were never written down.
+
+The same reasoning applies to any metric that is currently trivial: the cheap
+moment to start recording it is before it matters.
+
+### C104 — Logs leak differently from databases
+A database row is read by the application. A **log line is read by more people,
+kept longer, and often shipped to a third party** — so what is safe in one is
+not automatically safe in the other.
+
+Tool arguments are the sharp case here. The model composes them *from document
+text*, so `{"expression": "<something from the user's contract>"}` could carry
+private data straight into a log aggregator. The tool name, outcome and duration
+are logged; the arguments are not, and a test asserts the operands of a
+calculation appear nowhere in the output.
+
+Also deliberately quiet: `/healthz`. A load balancer probing every ten seconds
+is 8,640 lines a day saying nothing, and a log nobody can skim is a log nobody
+reads — the same failure as the red CI in C81.
+
+### C105 — The adapter is where provider quirks go, again
+Token usage on a streamed response:
+
+| Provider | How |
+|---|---|
+| OpenAI | requires `stream_options={"include_usage": True}` |
+| **Groq** | attaches `usage` to the final chunk **by default** |
+
+I wrote the OpenAI form from habit and Groq's SDK rejected the argument
+outright. The fix belongs in `groq_client.py` and nowhere above it — the fifth
+time this boundary has earned its place, after error translation, tool-call
+shapes, message serialisation and streaming deltas.
+
+Groq also reports `queue_time` separately, which is genuinely useful: on a free
+tier it is often most of the latency, and it is **not something our own code can
+improve**. Logging it separately keeps that distinction visible instead of
+hiding it inside one duration figure.
+
 ---
 
 ## 📊 REFERENCE — LLM API pricing (2026-08-02)
@@ -1280,3 +1350,4 @@ Plus a module-name collision caught by mypy → C35 / D15.
 | 2026-11-01 | **v0.3 Block 1 — tool-use framework.** `Tool` protocol, `ToolRegistry` that never raises, `Calculator` with an AST whitelist, tool-aware streaming in the Groq adapter, and the bounded loop in `ChatService`. D40 superseded by D44 during implementation. 79 tests; verified against the live Groq API — the model called the tool and returned the correct product of two five-digit numbers. Concepts C91–C94, decision D44 |
 | 2026-11-01 | **v0.3 Blocks 2–4 — three generator tools.** An `ArtifactStore` (PostgreSQL, owned per user) plus `create_document` (fpdf2), `create_spreadsheet` (openpyxl) and `create_chart` (matplotlib). `ToolContext` added so a tool knows who it acts for. 97 tests. Verified live: one question produced a bar chart *and* a spreadsheet, the model choosing both tools in a single turn. Concepts C95–C98, decisions D45–D47 |
 | 2026-11-01 | **v0.3 Block 5 — background jobs.** Celery on Redis; upload stores the bytes, queues an id and returns **202** with a job id; the UI polls. Closes D36. Three bugs only a running worker exposed: `NotRegistered`, macOS fork safety, and an import-time `get_settings()` that broke the no-secrets-in-CI invariant. 104 tests. Measured: request 0.06s, work 26.8s. Concepts C99–C101, decisions D48–D50 |
+| 2026-11-01 | **v0.3 Block 6 — structured logging. BLOCK COMPLETE, v0.3 feature-complete.** structlog with JSON in production; request/user correlation by context variable; tokens, cost and provider queue time on every LLM call; outcome and duration on every tool call and job. Tool arguments deliberately never logged. 110 tests. Concepts C102–C105, decisions D51–D53 |
